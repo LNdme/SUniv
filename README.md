@@ -99,6 +99,24 @@ quand les employer — sept outils et douze skills, tous dans
 l'amont, ce qui permet de continuer à en recevoir les améliorations.
 [`SUNIV.md`](./SUNIV.md) décrit la frontière et la procédure de synchronisation.
 
+### Le noyau, dans les termes de l'amont
+
+SUniv n'active ni Slack ni le portail public, mais le noyau les porte : ces surfaces
+restent disponibles pour qui en veut. Le README de QM décrit sa topologie ainsi, et nous
+la citons telle quelle plutôt que de la paraphraser — c'est le noyau qui l'exécute, pas
+SUniv :
+
+> The web UI, the admin panel, and the public portal are optional plugins over the
+> core's HTTP API; Slack is an optional in-process plugin that core starts and supervises
+> through a direct service client.
+>
+> The core runs TypeScript directly on Node and uses Fastify for HTTP. The Slack plugin
+> uses Bolt; the web UI builds with Vite and renders with Lit.
+
+Ces phrases sont vérifiées par `test/public-architecture-docs.test.ts`, un test amont qui
+lit ce fichier pour s'assurer que la documentation ne dérive pas du code. Les modifier
+casse la CI.
+
 ## Exécuter SUniv
 
 Il faut **Node 24 ou plus**, Docker, une clé de modèle (Anthropic, OpenAI ou OpenRouter),
