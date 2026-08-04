@@ -1,0 +1,14 @@
+{
+  "id": "suniv-doc",
+  "label": "Document conversion and bibliography",
+  "advertise": "suniv-doc",
+  "hints": [
+    "suniv-doc moves a draft between Markdown, Word, LaTeX and PDF. SUniv does not replace Word or LaTeX: whatever the student writes must come back out in the format their supervisor and their journal expect.",
+    "Render citations by passing --bib with the CSL-JSON that suniv-search produced, so every reference in the output traces back to a record that was actually retrieved. Pass --csl when the department imposes a style.",
+    "Use --reference-doc to keep a university's Word template when converting to .docx, rather than handing back an unstyled document.",
+    "Run `suniv-doc check` before promising an export. When pandoc or latexmk is missing, say so and name what is missing instead of producing a file the student cannot open."
+  ],
+  "install": {
+    "binary": "suniv-doc"
+  }
+}

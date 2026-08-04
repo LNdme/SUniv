@@ -1,0 +1,295 @@
+#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, extname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+
+const USAGE = `usage: suniv-lib <command> [options]
+
+  index --dir DIR            read every PDF under DIR into the local index
+  search <terms> [--limit N] find passages, with the page they sit on
+  sections --file PATH       list the section headings of one PDF
+  text --file PATH [--page N]
+  list                       what the index holds
+
+The index is the student's own PDFs — what they have already downloaded or
+been given. It needs no network and no subscription, and it is often the only
+place the full text of a paywalled article legitimately exists for them.`;
+
+function indexPath() {
+  return process.env.SUNIV_LIBRARY || join(homedir(), ".local", "share", "suniv", "library.json");
+}
+
+function loadIndex() {
+  const path = indexPath();
+  if (!existsSync(path)) return { version: 1, documents: [] };
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    throw new Error(`${path} is not readable as JSON; delete it to rebuild the index`);
+  }
+}
+
+function saveIndex(index) {
+  const path = indexPath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(index));
+}
+
+function havePdftotext() {
+  return (process.env.PATH || "").split(":").some((dir) => dir && existsSync(join(dir, "pdftotext")));
+}
+
+function pdfPages(path) {
+  if (!havePdftotext()) {
+    throw new Error(
+      "pdftotext is not installed, so PDFs cannot be read.\n" +
+        "Install it with: apt-get install poppler-utils (Debian) or brew install poppler (macOS).\n" +
+        "In a deployment, add it to the layer's sandbox image.",
+    );
+  }
+  const result = spawnSync("pdftotext", ["-layout", path, "-"], { encoding: "utf8", maxBuffer: 128 * 1024 * 1024 });
+  if (result.status !== 0) throw new Error(`pdftotext failed on ${path}: ${(result.stderr || "").slice(0, 400)}`);
+  return result.stdout.split("\f").map((page) => page.replace(/\s+$/, ""));
+}
+
+function walk(dir, out = []) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) walk(full, out);
+    else if (extname(entry.name).toLowerCase() === ".pdf") out.push(full);
+  }
+  return out;
+}
+
+const BOILERPLATE =
+  /\b(arxiv:|doi:|copyright|permission|licen[cs]e|creative commons|all rights reserved|preprint|submitted to|accepted at|proceedings of|conference on|©)/i;
+
+function guessTitle(pages) {
+  const lines = (pages[0] || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 20);
+  const plausible = lines.filter(
+    (line) => line.length > 15 && line.length < 220 && !/^\d+$/.test(line) && !BOILERPLATE.test(line),
+  );
+  const titleCased = plausible.find((line) => {
+    if (line.length > 150) return false;
+    const words = line.split(/\s+/).filter((word) => word.length > 3);
+    if (words.length < 2) return false;
+    return words.filter((word) => /^[A-Z]/.test(word)).length / words.length >= 0.6;
+  });
+  return titleCased || plausible[0] || "";
+}
+
+const HEADING = /^\s*((?:\d+(?:\.\d+)*)[.)]?\s+[A-Z][^\n]{2,80}|(?:[IVX]+\.)\s+[A-Z][^\n]{2,80}|(?:ABSTRACT|INTRODUCTION|RELATED WORK|BACKGROUND|METHODS?|METHODOLOGY|MATERIALS AND METHODS|EXPERIMENTS?|EXPERIMENTAL SETUP|RESULTS|DISCUSSION|CONCLUSIONS?|REFERENCES|ACKNOWLEDG(?:E)?MENTS?)\s*)$/;
+
+function headings(pages) {
+  const found = [];
+  pages.forEach((page, pageIndex) => {
+    for (const line of page.split("\n")) {
+      const match = HEADING.exec(line);
+      if (match) found.push({ page: pageIndex + 1, heading: match[1].trim() });
+    }
+  });
+  return found;
+}
+
+function commandIndex(options) {
+  if (!options.dir) throw new Error("index needs --dir");
+  const root = resolve(options.dir);
+  if (!existsSync(root) || !statSync(root).isDirectory()) throw new Error(`not a directory: ${root}`);
+
+  const index = loadIndex();
+  const byPath = new Map(index.documents.map((doc) => [doc.path, doc]));
+  const files = walk(root);
+  const report = { root, seen: files.length, added: 0, updated: 0, unchanged: 0, failed: [] };
+
+  for (const file of files) {
+    const stats = statSync(file);
+    const existing = byPath.get(file);
+    if (existing && existing.size === stats.size && existing.mtimeMs === stats.mtimeMs) {
+      report.unchanged++;
+      continue;
+    }
+    let pages;
+    try {
+      pages = pdfPages(file);
+    } catch (err) {
+      report.failed.push({ path: file, reason: err.message.split("\n")[0] });
+      continue;
+    }
+    const doc = {
+      path: file,
+      size: stats.size,
+      mtimeMs: stats.mtimeMs,
+      pageCount: pages.length,
+      titleGuess: guessTitle(pages),
+      headings: headings(pages),
+      pages,
+    };
+    byPath.set(file, doc);
+    if (existing) report.updated++;
+    else report.added++;
+  }
+
+  index.documents = [...byPath.values()];
+  saveIndex(index);
+  const { failed, ...counts } = report;
+  process.stdout.write(`${JSON.stringify({ ...counts, indexed: index.documents.length, failed }, null, 2)}\n`);
+  return 0;
+}
+
+function commandSearch(options) {
+  const terms = options._.slice(1).filter(Boolean);
+  if (!terms.length) throw new Error("search needs terms");
+  const index = loadIndex();
+  if (!index.documents.length) throw new Error("the index is empty; run `suniv-lib index --dir <folder>` first");
+
+  const needles = terms.map((t) => t.toLowerCase());
+  const hits = [];
+  for (const doc of index.documents) {
+    doc.pages.forEach((page, pageIndex) => {
+      const haystack = page.toLowerCase();
+      if (!needles.every((needle) => haystack.includes(needle))) return;
+      const at = haystack.indexOf(needles[0]);
+      hits.push({
+        path: doc.path,
+        titleGuess: doc.titleGuess,
+        page: pageIndex + 1,
+        passage: page.slice(Math.max(0, at - 160), at + 320).replace(/\s+/g, " ").trim(),
+      });
+    });
+  }
+  process.stdout.write(
+    `${JSON.stringify({ terms, count: hits.length, hits: hits.slice(0, options.limit || 20) }, null, 2)}\n`,
+  );
+  return 0;
+}
+
+function documentFor(path) {
+  const index = loadIndex();
+  const wanted = resolve(path);
+  const doc = index.documents.find((d) => d.path === wanted);
+  if (doc) return doc;
+  const pages = pdfPages(wanted);
+  return { path: wanted, pageCount: pages.length, titleGuess: guessTitle(pages), headings: headings(pages), pages };
+}
+
+function commandSections(options) {
+  if (!options.file) throw new Error("sections needs --file");
+  const doc = documentFor(options.file);
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        path: doc.path,
+        titleGuess: doc.titleGuess,
+        pageCount: doc.pageCount,
+        sections: doc.headings,
+        note: doc.headings.length
+          ? "Cite a claim by the heading it sits under, so the student can find it in their own copy."
+          : "No headings matched the usual patterns; read the pages directly rather than inventing a structure.",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  return 0;
+}
+
+function commandText(options) {
+  if (!options.file) throw new Error("text needs --file");
+  const doc = documentFor(options.file);
+  if (options.page) {
+    const page = doc.pages[options.page - 1];
+    if (page === undefined) throw new Error(`${doc.path} has ${doc.pageCount} pages; ${options.page} is out of range`);
+    process.stdout.write(`${page}\n`);
+    return 0;
+  }
+  process.stdout.write(doc.pages.join("\f"));
+  return 0;
+}
+
+function commandList() {
+  const index = loadIndex();
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        indexFile: indexPath(),
+        count: index.documents.length,
+        documents: index.documents.map((d) => ({ path: d.path, titleGuess: d.titleGuess, pages: d.pageCount })),
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  return 0;
+}
+
+function parseArgs(argv) {
+  const options = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const next = () => argv[++i];
+    switch (arg) {
+      case "-h":
+      case "--help":
+        return { help: true };
+      case "--dir":
+        options.dir = next();
+        break;
+      case "--file":
+        options.file = next();
+        break;
+      case "--page":
+        options.page = Number.parseInt(next(), 10);
+        break;
+      case "--limit":
+        options.limit = Number.parseInt(next(), 10);
+        break;
+      default:
+        if (arg.startsWith("--")) return { error: `unknown option ${arg}` };
+        options._.push(arg);
+    }
+  }
+  return { options };
+}
+
+function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.help) {
+    process.stdout.write(`${USAGE}\n`);
+    return 0;
+  }
+  if (parsed.error) {
+    process.stderr.write(`suniv-lib: ${parsed.error}\n\n${USAGE}\n`);
+    return 2;
+  }
+
+  const { options } = parsed;
+  const [command] = options._;
+  try {
+    switch (command) {
+      case undefined:
+      case "list":
+        return commandList();
+      case "index":
+        return commandIndex(options);
+      case "search":
+        return commandSearch(options);
+      case "sections":
+        return commandSections(options);
+      case "text":
+        return commandText(options);
+      default:
+        process.stderr.write(`suniv-lib: unknown command "${command}"\n\n${USAGE}\n`);
+        return 2;
+    }
+  } catch (err) {
+    process.stderr.write(`suniv-lib: ${err.message}\n`);
+    return 1;
+  }
+}
+
+process.exitCode = main();

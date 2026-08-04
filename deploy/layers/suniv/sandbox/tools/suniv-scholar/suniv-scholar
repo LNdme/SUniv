@@ -1,0 +1,196 @@
+#!/usr/bin/env node
+const USAGE = `usage: suniv-scholar <query> [options]
+
+  --limit N            results to return (default 10, one paid search per 20)
+  --from YEAR          earliest publication year
+  --to YEAR            latest publication year
+  --status             report whether a provider key is present
+
+Google Scholar publishes no API, and scraping it breaks Google's terms and is
+blocked by CAPTCHA. SUniv therefore never fetches scholar.google.com itself.
+It reaches Scholar only through SerpApi, a commercial provider the student or
+their institution pays for and whose terms cover the retrieval.
+
+Without SERPAPI_API_KEY there are two honest routes, and this tool will name
+them rather than scrape:
+  - suniv-search, which covers most of the same literature through APIs that
+    publish terms of use, and returns DOIs;
+  - the Zotero Connector in the student's own browser, which saves Scholar
+    results the student is already looking at.`;
+
+const KEY = "SERPAPI_API_KEY";
+
+function refuse(reason) {
+  process.stderr.write(`suniv-scholar: ${reason}\n\n${USAGE}\n`);
+  return 2;
+}
+
+function splitName(display) {
+  const clean = String(display || "").trim();
+  if (!clean) return null;
+  const parts = clean.split(/\s+/);
+  if (parts.length === 1) return { family: parts[0] };
+  return { family: parts.at(-1), given: parts.slice(0, -1).join(" ") };
+}
+
+function parsePublicationInfo(summary) {
+  const text = String(summary || "");
+  const year = /\b(1[89]\d{2}|20\d{2})\b/.exec(text);
+  const [authorPart, venuePart] = text.split(" - ");
+  return {
+    authors: (authorPart || "")
+      .split(",")
+      .map((name) => splitName(name))
+      .filter(Boolean),
+    venue: (venuePart || "").replace(/\b(1[89]\d{2}|20\d{2})\b/, "").replace(/[-,]\s*$/, "").trim() || undefined,
+    year: year ? Number(year[1]) : undefined,
+  };
+}
+
+async function serpapi(query, options) {
+  const url = new URL("https://serpapi.com/search.json");
+  url.searchParams.set("engine", "google_scholar");
+  url.searchParams.set("q", query);
+  url.searchParams.set("api_key", process.env[KEY]);
+  url.searchParams.set("num", String(Math.min(options.limit, 20)));
+  if (options.from) url.searchParams.set("as_ylo", String(options.from));
+  if (options.to) url.searchParams.set("as_yhi", String(options.to));
+
+  const control = new AbortController();
+  const timer = setTimeout(() => control.abort(), 30000);
+  let response;
+  try {
+    response = await fetch(url, { headers: { accept: "application/json" }, signal: control.signal });
+  } catch (err) {
+    throw new Error(err.name === "AbortError" ? "SerpApi timed out" : `SerpApi: ${err.message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const body = await response.json().catch(() => ({}));
+  if (response.status === 401) throw new Error(`SerpApi rejected ${KEY}`);
+  if (response.status === 429) throw new Error("SerpApi searches for this plan are exhausted");
+  if (!response.ok) throw new Error(body.error || `SerpApi HTTP ${response.status}`);
+  return body;
+}
+
+function toItem(result) {
+  const info = parsePublicationInfo(result.publication_info?.summary);
+  const pdf = (result.resources || []).find((r) => r.file_format === "PDF" || /\.pdf($|\?)/i.test(r.link || ""));
+  return {
+    id: `scholar:${result.result_id}`,
+    type: "article-journal",
+    title: result.title || "",
+    author: info.authors,
+    issued: info.year ? { "date-parts": [[info.year]] } : undefined,
+    "container-title": info.venue,
+    URL: result.link || undefined,
+    custom: {
+      suniv: {
+        sources: ["scholar"],
+        citedBy: result.inline_links?.cited_by?.total,
+        pdfUrl: pdf?.link,
+        snippet: result.snippet || undefined,
+        grounding: pdf ? "fulltext" : "metadata",
+        groundingNote: pdf
+          ? "A PDF copy is linked; read it before describing the method."
+          : "Metadata only. The snippet Scholar returns is matched text, not an abstract — never read it as a summary of the work, and never describe the objective or method from it.",
+        resolveNote:
+          "Scholar returns no DOI. Before citing this work, resolve it with suniv-search so the citation rests on a record with an identifier.",
+      },
+    },
+  };
+}
+
+function parseArgs(argv) {
+  const options = { limit: 10, _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const next = () => argv[++i];
+    switch (arg) {
+      case "-h":
+      case "--help":
+        return { help: true };
+      case "--status":
+        options.status = true;
+        break;
+      case "--limit":
+        options.limit = Number.parseInt(next(), 10);
+        break;
+      case "--from":
+        options.from = Number.parseInt(next(), 10);
+        break;
+      case "--to":
+        options.to = Number.parseInt(next(), 10);
+        break;
+      case "--csl":
+        options.csl = true;
+        break;
+      default:
+        if (arg.startsWith("--")) return { error: `unknown option ${arg}` };
+        options._.push(arg);
+    }
+  }
+  options.query = options._.join(" ").trim();
+  return { options };
+}
+
+async function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.help) {
+    process.stdout.write(`${USAGE}\n`);
+    return 0;
+  }
+  if (parsed.error) return refuse(parsed.error);
+
+  const { options } = parsed;
+  if (options.status) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          provider: "serpapi",
+          configured: Boolean(process.env[KEY]),
+          scrapes: false,
+          note: "Google Scholar has no API. SUniv reaches it only through a paid provider, and never fetches scholar.google.com itself.",
+          alternative: "suniv-search returns DOIs and needs no provider.",
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    return 0;
+  }
+
+  if (!process.env[KEY]) return refuse(`${KEY} is not set, and SUniv will not scrape Google Scholar to work around it`);
+  if (!options.query) return refuse("a query is required");
+
+  let body;
+  try {
+    body = await serpapi(options.query, options);
+  } catch (err) {
+    process.stderr.write(`suniv-scholar: ${err.message}\nsuniv-search covers most of this literature and returns DOIs.\n`);
+    return 1;
+  }
+
+  const items = (body.organic_results || []).slice(0, options.limit).map(toItem);
+  if (options.csl) {
+    process.stdout.write(`${JSON.stringify(items, null, 2)}\n`);
+    return 0;
+  }
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        query: options.query,
+        provider: "serpapi",
+        count: items.length,
+        items,
+        note: "Scholar records carry no DOI. Resolve each one with suniv-search before it enters a bibliography.",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  return 0;
+}
+
+process.exitCode = await main();

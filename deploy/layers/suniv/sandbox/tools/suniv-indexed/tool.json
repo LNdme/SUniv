@@ -1,0 +1,19 @@
+{
+  "id": "suniv-indexed",
+  "label": "Scopus and IEEE Xplore",
+  "advertise": "suniv-indexed",
+  "hints": [
+    "suniv-indexed reaches Scopus and IEEE Xplore with the student's own institutional key. Reach for suniv-search first: it needs no subscription and covers most of the same literature. Use suniv-indexed when the student asks for Scopus or IEEE by name, or when a supervisor requires an indexed source.",
+    "A Scopus key is bound to the subscribing institution's IP ranges. From a hosted sandbox the outbound address is not the campus, so a perfectly valid key returns an authentication error. Report that as what it is — a location problem, not a wrong key — and point to running SUniv on the student's machine or connecting the institutional VPN.",
+    "These indexes return abstracts at best, never subscription full text. Results are therefore grounded at \"abstract\" or \"metadata\": report the method the abstract states, and never infer a design the text would have to confirm."
+  ],
+  "egress": ["api.elsevier.com", "ieeexploreapi.ieee.org"],
+  "auth": {
+    "check": "suniv-indexed --status",
+    "reauth": "Set ELSEVIER_API_KEY (dev.elsevier.com) and IEEE_API_KEY (developer.ieee.org). ELSEVIER_INSTTOKEN is optional and comes from apisupport@elsevier.com.",
+    "credentialPaths": [{ "path": ".config/suniv/indexed.env", "kind": "file" }]
+  },
+  "install": {
+    "binary": "suniv-indexed"
+  }
+}

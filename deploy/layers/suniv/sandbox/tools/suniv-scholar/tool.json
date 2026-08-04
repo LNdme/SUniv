@@ -1,0 +1,27 @@
+{
+  "id": "suniv-scholar",
+  "label": "Google Scholar (via a paid provider)",
+  "advertise": "suniv-scholar",
+  "hints": [
+    "Google Scholar publishes no API, and scraping it breaks Google's terms and is defeated by CAPTCHA. Never fetch scholar.google.com with curl, wget, a browser tool or any other means, and never work around a missing key that way. suniv-scholar reaches Scholar only through SerpApi, whose terms cover the retrieval.",
+    "Without SERPAPI_API_KEY the tool refuses and names the two honest routes: suniv-search, or the Zotero Connector in the student's own browser. Relay that refusal — it is the correct answer, not an obstacle to route around.",
+    "Scholar returns no DOI, and the snippet it returns is matched text rather than an abstract. Treat every Scholar hit as a lead: resolve it through suniv-search to obtain a record with an identifier before it enters a bibliography or a draft.",
+    "Each search spends the student's own SerpApi credits, so prefer suniv-search unless Scholar was asked for by name."
+  ],
+  "egress": ["serpapi.com"],
+  "approvals": [
+    {
+      "command": "suniv-scholar",
+      "decision": "require_approval",
+      "reason": "Each Scholar search spends the student's paid SerpApi credits."
+    }
+  ],
+  "auth": {
+    "check": "suniv-scholar --status",
+    "reauth": "Set SERPAPI_API_KEY from serpapi.com. There is no free or unauthenticated path to Scholar, by Google's design.",
+    "credentialPaths": [{ "path": ".config/suniv/scholar.env", "kind": "file" }]
+  },
+  "install": {
+    "binary": "suniv-scholar"
+  }
+}

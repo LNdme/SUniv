@@ -1,0 +1,359 @@
+#!/usr/bin/env node
+import { readFileSync } from "node:fs";
+
+const CSL_TYPE_TO_ZOTERO = {
+  "article-journal": "journalArticle",
+  article: "preprint",
+  "paper-conference": "conferencePaper",
+  chapter: "bookSection",
+  book: "book",
+  thesis: "thesis",
+  report: "report",
+  dataset: "dataset",
+  webpage: "webpage",
+  manuscript: "manuscript",
+};
+
+const CONTAINER_FIELD = {
+  journalArticle: "publicationTitle",
+  conferencePaper: "proceedingsTitle",
+  bookSection: "bookTitle",
+  preprint: "repository",
+  report: "institution",
+  thesis: "university",
+};
+
+class ZoteroError extends Error {}
+
+function localBase() {
+  return process.env.ZOTERO_LOCAL_API || "http://localhost:23119/api";
+}
+
+function webKey() {
+  return process.env.ZOTERO_API_KEY || "";
+}
+
+function userId() {
+  return process.env.ZOTERO_USER_ID || "";
+}
+
+function describeAuth() {
+  const lines = ["suniv-zotero: no Zotero access is configured. Two paths exist, and they do different things:"];
+  lines.push(
+    "  local  — Zotero 7 running on this machine with 'Allow other applications on this computer to communicate with Zotero' enabled. Reads the library with no key, and cannot write.",
+  );
+  lines.push(
+    "  web    — ZOTERO_API_KEY and ZOTERO_USER_ID from zotero.org/settings/keys. Reads and writes, and is the only way to file items into collections.",
+  );
+  return lines.join("\n");
+}
+
+async function request(url, { method = "GET", headers = {}, body } = {}) {
+  const control = new AbortController();
+  const timer = setTimeout(() => control.abort(), 20000);
+  let response;
+  try {
+    response = await fetch(url, {
+      method,
+      body,
+      headers: { accept: "application/json", "user-agent": "SUniv/1.0", ...headers },
+      signal: control.signal,
+    });
+  } catch (err) {
+    throw new ZoteroError(err.name === "AbortError" ? `${url} timed out` : `${url}: ${err.message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new ZoteroError(`${method} ${url} → HTTP ${response.status} ${response.statusText}\n${text.slice(0, 400)}`);
+  }
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+async function localAvailable() {
+  try {
+    await request(`${localBase()}/users/0/collections?limit=1`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readApi(path, { preferLocal = true } = {}) {
+  if (preferLocal && (await localAvailable())) {
+    return { via: "local", data: await request(`${localBase()}/users/0${path}`) };
+  }
+  if (!webKey() || !userId()) throw new ZoteroError(describeAuth());
+  return {
+    via: "web",
+    data: await request(`https://api.zotero.org/users/${userId()}${path}`, {
+      headers: { "Zotero-API-Key": webKey(), "Zotero-API-Version": "3" },
+    }),
+  };
+}
+
+async function writeApi(path, payload, method = "POST") {
+  if (!webKey() || !userId()) {
+    throw new ZoteroError(
+      `${describeAuth()}\n\nWriting needs the web path: Zotero's local API is read-only by design, so a key is required to create items, collections or tags.`,
+    );
+  }
+  return await request(`https://api.zotero.org/users/${userId()}${path}`, {
+    method,
+    headers: {
+      "Zotero-API-Key": webKey(),
+      "Zotero-API-Version": "3",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+}
+
+function cslDate(issued) {
+  const parts = issued?.["date-parts"]?.[0];
+  if (!Array.isArray(parts) || !parts.length) return "";
+  return parts
+    .slice(0, 3)
+    .map((n, i) => (i === 0 ? String(n) : String(n).padStart(2, "0")))
+    .join("-");
+}
+
+function cslToZotero(item, { collections = [], tags = [] } = {}) {
+  const itemType = CSL_TYPE_TO_ZOTERO[item.type] || "journalArticle";
+  const zoteroItem = {
+    itemType,
+    title: item.title || "",
+    creators: (item.author || [])
+      .map((a) => {
+        if (a.family && a.given) return { creatorType: "author", firstName: a.given, lastName: a.family };
+        if (a.family) return { creatorType: "author", name: a.family };
+        if (a.literal) return { creatorType: "author", name: a.literal };
+        return null;
+      })
+      .filter(Boolean),
+    abstractNote: item.abstract || "",
+    date: cslDate(item.issued),
+    url: item.URL || "",
+    volume: item.volume ? String(item.volume) : "",
+    issue: item.issue ? String(item.issue) : "",
+    pages: item.page ? String(item.page) : "",
+    tags: tags.map((tag) => ({ tag })),
+    collections,
+  };
+
+  const containerField = CONTAINER_FIELD[itemType];
+  if (containerField && item["container-title"]) zoteroItem[containerField] = item["container-title"];
+  if (itemType === "journalArticle" || itemType === "conferencePaper" || itemType === "preprint") {
+    if (item.DOI) zoteroItem.DOI = item.DOI;
+  } else if (item.DOI) {
+    zoteroItem.extra = `DOI: ${item.DOI}`;
+  }
+
+  const grounding = item.custom?.suniv?.grounding;
+  if (grounding) {
+    const note = `SUniv grounding: ${grounding}`;
+    zoteroItem.extra = zoteroItem.extra ? `${zoteroItem.extra}\n${note}` : note;
+  }
+
+  for (const key of Object.keys(zoteroItem)) {
+    if (zoteroItem[key] === "" || (Array.isArray(zoteroItem[key]) && !zoteroItem[key].length)) {
+      if (key !== "collections" && key !== "tags" && key !== "creators") delete zoteroItem[key];
+    }
+  }
+  return zoteroItem;
+}
+
+function chunk(items, size) {
+  const out = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+
+
+const USAGE = `usage: suniv-zotero <command> [options]
+
+  status                          report which Zotero paths are reachable
+  collections                     list collections with their keys
+  search <terms>                  search the library
+  items [--collection KEY]        list items, optionally within a collection
+  add --file items.json           file CSL-JSON works into the library
+       [--collection NAME|KEY]    create the collection if the name is unknown
+       [--tag TAG]                repeatable
+  tag --item KEY --tag TAG        add tags to an existing item
+
+Reads prefer Zotero running locally (no key, works offline). Writes always go
+through the web API, because Zotero's local API is read-only by design.`;
+
+function parseArgs(argv) {
+  const options = { tags: [], _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const next = () => argv[++i];
+    switch (arg) {
+      case "-h":
+      case "--help":
+        return { help: true };
+      case "--file":
+        options.file = next();
+        break;
+      case "--collection":
+        options.collection = next();
+        break;
+      case "--tag":
+        options.tags.push(next());
+        break;
+      case "--item":
+        options.item = next();
+        break;
+      default:
+        if (arg.startsWith("--")) return { error: `unknown option ${arg}` };
+        options._.push(arg);
+    }
+  }
+  return { options };
+}
+
+function print(value) {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+async function findCollectionKey(name) {
+  const { data } = await readApi("/collections?limit=100");
+  const collections = (data || []).map((c) => ({ key: c.key || c.data?.key, name: c.data?.name ?? c.name }));
+  const exact = collections.find((c) => c.key === name || c.name === name);
+  if (exact) return { key: exact.key, created: false };
+  const insensitive = collections.find((c) => String(c.name).toLowerCase() === String(name).toLowerCase());
+  if (insensitive) return { key: insensitive.key, created: false };
+  const result = await writeApi("/collections", [{ name }]);
+  const created = result?.successful?.["0"];
+  if (!created) throw new ZoteroError(`could not create collection "${name}": ${JSON.stringify(result)}`);
+  return { key: created.key ?? created.data?.key, created: true };
+}
+
+async function commandStatus() {
+  const local = await localAvailable();
+  print({
+    local: {
+      reachable: local,
+      base: process.env.ZOTERO_LOCAL_API || "http://localhost:23119/api",
+      capability: "read-only",
+      note: local
+        ? "Zotero is running here; reads use it and need no key."
+        : "No local Zotero. That is expected in a hosted sandbox — it needs Zotero 7 on the same machine with the local API enabled.",
+    },
+    web: {
+      configured: Boolean(webKey() && userId()),
+      capability: "read and write",
+      note: webKey() && userId() ? "Key present." : "Set ZOTERO_API_KEY and ZOTERO_USER_ID from zotero.org/settings/keys.",
+    },
+  });
+}
+
+async function commandAdd(options) {
+  if (!options.file) throw new ZoteroError("add needs --file with a CSL-JSON array (suniv-search --csl writes one)");
+  const raw = JSON.parse(readFileSync(options.file, "utf8"));
+  const works = Array.isArray(raw) ? raw : raw.items;
+  if (!Array.isArray(works) || !works.length) throw new ZoteroError(`${options.file} holds no CSL-JSON items`);
+
+  let collections = [];
+  let collectionInfo = null;
+  if (options.collection) {
+    const resolved = await findCollectionKey(options.collection);
+    collections = [resolved.key];
+    collectionInfo = { name: options.collection, key: resolved.key, created: resolved.created };
+  }
+
+  const payload = works.map((work) => cslToZotero(work, { collections, tags: options.tags }));
+  const report = { collection: collectionInfo, submitted: payload.length, created: [], failed: [] };
+
+  for (const batch of chunk(payload, 50)) {
+    const result = await writeApi("/items", batch);
+    for (const [index, entry] of Object.entries(result?.successful || {})) {
+      report.created.push({ key: entry.key ?? entry.data?.key, title: batch[Number(index)]?.title });
+    }
+    for (const [index, entry] of Object.entries(result?.failed || {})) {
+      report.failed.push({ title: batch[Number(index)]?.title, reason: entry.message || JSON.stringify(entry) });
+    }
+    for (const index of Object.keys(result?.unchanged || {})) {
+      report.failed.push({ title: batch[Number(index)]?.title, reason: "unchanged — Zotero already holds this item" });
+    }
+  }
+  print(report);
+}
+
+async function commandTag(options) {
+  if (!options.item || !options.tags.length) throw new ZoteroError("tag needs --item KEY and at least one --tag");
+  const { data } = await readApi(`/items/${options.item}`, { preferLocal: false });
+  const existing = data?.data?.tags || [];
+  const merged = [...existing];
+  for (const tag of options.tags) if (!merged.some((t) => t.tag === tag)) merged.push({ tag });
+  await writeApi(`/items/${options.item}`, { version: data.version ?? data.data?.version, tags: merged }, "PATCH");
+  print({ item: options.item, tags: merged.map((t) => t.tag) });
+}
+
+async function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.help) {
+    process.stdout.write(`${USAGE}\n`);
+    return 0;
+  }
+  if (parsed.error) {
+    process.stderr.write(`suniv-zotero: ${parsed.error}\n\n${USAGE}\n`);
+    return 2;
+  }
+
+  const { options } = parsed;
+  const [command, ...rest] = options._;
+
+  try {
+    switch (command) {
+      case undefined:
+      case "status":
+        await commandStatus();
+        return 0;
+      case "collections": {
+        const { via, data } = await readApi("/collections?limit=100");
+        print({ via, collections: (data || []).map((c) => ({ key: c.key ?? c.data?.key, name: c.data?.name ?? c.name })) });
+        return 0;
+      }
+      case "search": {
+        const terms = rest.join(" ");
+        if (!terms) throw new ZoteroError("search needs terms");
+        const { via, data } = await readApi(`/items?q=${encodeURIComponent(terms)}&limit=50`);
+        print({ via, count: (data || []).length, items: data });
+        return 0;
+      }
+      case "items": {
+        const path = options.collection ? `/collections/${options.collection}/items?limit=100` : "/items?limit=100";
+        const { via, data } = await readApi(path);
+        print({ via, count: (data || []).length, items: data });
+        return 0;
+      }
+      case "add":
+        await commandAdd(options);
+        return 0;
+      case "tag":
+        await commandTag(options);
+        return 0;
+      default:
+        process.stderr.write(`suniv-zotero: unknown command "${command}"\n\n${USAGE}\n`);
+        return 2;
+    }
+  } catch (err) {
+    if (err instanceof ZoteroError) {
+      process.stderr.write(`${err.message}\n`);
+      return 1;
+    }
+    throw err;
+  }
+}
+
+process.exitCode = await main();

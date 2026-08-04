@@ -1,0 +1,20 @@
+{
+  "id": "suniv-zotero",
+  "label": "Zotero library",
+  "advertise": "suniv-zotero",
+  "hints": [
+    "suniv-zotero is the student's reference library. File works there as soon as they are worth keeping — a search result that is never filed is lost the moment the conversation ends.",
+    "Pipe suniv-search --csl into a file and pass it to `suniv-zotero add --file`; the CSL-JSON converts to Zotero's schema, and the grounding level travels with the item so a later draft still knows what was actually read.",
+    "Reads prefer a Zotero running on the same machine and need no key. Writes always need ZOTERO_API_KEY and ZOTERO_USER_ID, because Zotero's local API is read-only by design — say so plainly rather than reporting a failed write.",
+    "Run `suniv-zotero status` before concluding that Zotero is unavailable; it names which of the two paths is reachable."
+  ],
+  "egress": ["api.zotero.org"],
+  "auth": {
+    "check": "suniv-zotero status",
+    "reauth": "Create a key at https://www.zotero.org/settings/keys with write access, then set ZOTERO_API_KEY and ZOTERO_USER_ID.",
+    "credentialPaths": [{ "path": ".config/suniv/zotero.env", "kind": "file" }]
+  },
+  "install": {
+    "binary": "suniv-zotero"
+  }
+}

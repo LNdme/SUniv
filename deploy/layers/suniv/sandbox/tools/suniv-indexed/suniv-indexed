@@ -1,0 +1,273 @@
+#!/usr/bin/env node
+const USAGE = `usage: suniv-indexed <query> [options]
+
+  --source scopus|ieee|all   which subscription index to query (default all)
+  --limit N                  results per index (default 20)
+  --from YEAR / --to YEAR    publication year bounds
+  --status                   report which keys are present, and query nothing
+
+Scopus and IEEE Xplore are subscription indexes. Their keys belong to the
+student's institution, not to SUniv, and Elsevier binds a Scopus key to the
+subscribing institution's IP ranges: the same key that works on campus returns
+an authentication error from a cloud sandbox. Use suniv-search for coverage
+that does not depend on a subscription.`;
+
+const SCOPUS_KEY = "ELSEVIER_API_KEY";
+const SCOPUS_TOKEN = "ELSEVIER_INSTTOKEN";
+const IEEE_KEY = "IEEE_API_KEY";
+
+function splitName(display) {
+  const clean = String(display || "").trim();
+  if (!clean) return null;
+  if (clean.includes(",")) {
+    const [family, given] = clean.split(",", 2);
+    return { family: family.trim(), given: (given || "").trim() };
+  }
+  const parts = clean.split(/\s+/);
+  if (parts.length === 1) return { family: parts[0] };
+  return { family: parts.at(-1), given: parts.slice(0, -1).join(" ") };
+}
+
+function issuedFromDate(value) {
+  const match = /^(\d{4})(?:-(\d{2}))?(?:-(\d{2}))?/.exec(String(value || ""));
+  if (!match) return undefined;
+  const parts = [Number(match[1])];
+  if (match[2]) parts.push(Number(match[2]));
+  if (match[3]) parts.push(Number(match[3]));
+  return { "date-parts": [parts] };
+}
+
+function ground(item) {
+  item.custom = item.custom || {};
+  const meta = (item.custom.suniv = item.custom.suniv || {});
+  if (item.abstract && item.abstract.length >= 40) {
+    meta.grounding = "abstract";
+    meta.groundingNote =
+      "Abstract only: describe the method the abstract states, attributed as such. The full text sits behind the institution's subscription, so do not infer beyond it.";
+  } else {
+    meta.grounding = "metadata";
+    meta.groundingNote =
+      "Metadata only: this index returned no abstract. Do not describe the objective or method — give the DOI and say the text was not retrieved.";
+  }
+  return item;
+}
+
+class IndexError extends Error {
+  constructor(source, message, remedy) {
+    super(message);
+    this.source = source;
+    this.remedy = remedy;
+  }
+}
+
+async function call(source, url, headers) {
+  const control = new AbortController();
+  const timer = setTimeout(() => control.abort(), 25000);
+  let response;
+  try {
+    response = await fetch(url, { headers: { accept: "application/json", ...headers }, signal: control.signal });
+  } catch (err) {
+    throw new IndexError(source, err.name === "AbortError" ? "timed out" : err.message);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const text = await response.text();
+  if (response.status === 401 || response.status === 403) {
+    throw new IndexError(
+      source,
+      `HTTP ${response.status} — the key was rejected`,
+      source === "scopus"
+        ? "A Scopus key is bound to the subscribing institution's IP ranges. From a cloud sandbox the outbound address is not the campus, so the key fails even when it is valid. Run SUniv on the student's own machine, or connect their institutional VPN first. If it fails on campus too, the key needs an institutional token from apisupport@elsevier.com."
+        : "Check IEEE_API_KEY at developer.ieee.org, and confirm the institution's subscription covers the API and not only the website.",
+    );
+  }
+  if (response.status === 429) throw new IndexError(source, "HTTP 429 — quota exhausted for this key");
+  if (!response.ok) throw new IndexError(source, `HTTP ${response.status} ${response.statusText}`.trim());
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new IndexError(source, "response was not JSON");
+  }
+}
+
+async function scopus(query, options) {
+  const key = process.env[SCOPUS_KEY];
+  if (!key) throw new IndexError("scopus", `${SCOPUS_KEY} is not set`, "Register a key at dev.elsevier.com.");
+
+  const url = new URL("https://api.elsevier.com/content/search/scopus");
+  const bounded = [query];
+  if (options.from || options.to) bounded.push(`PUBYEAR > ${(options.from || 1) - 1}`);
+  if (options.to) bounded.push(`PUBYEAR < ${options.to + 1}`);
+  url.searchParams.set("query", bounded.join(" AND "));
+  url.searchParams.set("count", String(Math.min(options.limit, 25)));
+  url.searchParams.set("view", "STANDARD");
+
+  const headers = { "X-ELS-APIKey": key };
+  if (process.env[SCOPUS_TOKEN]) headers["X-ELS-Insttoken"] = process.env[SCOPUS_TOKEN];
+
+  const body = await call("scopus", url.toString(), headers);
+  return (body["search-results"]?.entry || [])
+    .filter((entry) => !entry.error)
+    .map((entry) =>
+      ground({
+        id: `scopus:${entry["dc:identifier"] || entry["eid"]}`,
+        type: "article-journal",
+        title: entry["dc:title"] || "",
+        author: [splitName(entry["dc:creator"])].filter(Boolean),
+        issued: issuedFromDate(entry["prism:coverDate"]),
+        "container-title": entry["prism:publicationName"] || undefined,
+        volume: entry["prism:volume"] || undefined,
+        issue: entry["prism:issueIdentifier"] || undefined,
+        page: entry["prism:pageRange"] || undefined,
+        DOI: entry["prism:doi"] || undefined,
+        URL: entry["prism:doi"] ? `https://doi.org/${entry["prism:doi"]}` : undefined,
+        abstract: entry["dc:description"] || undefined,
+        custom: {
+          suniv: {
+            sources: ["scopus"],
+            citedBy: Number(entry["citedby-count"] ?? 0) || undefined,
+            scopusId: entry["dc:identifier"],
+          },
+        },
+      }),
+    );
+}
+
+async function ieee(query, options) {
+  const key = process.env[IEEE_KEY];
+  if (!key) throw new IndexError("ieee", `${IEEE_KEY} is not set`, "Request a key at developer.ieee.org.");
+
+  const url = new URL("https://ieeexploreapi.ieee.org/api/v1/search/articles");
+  url.searchParams.set("apikey", key);
+  url.searchParams.set("querytext", query);
+  url.searchParams.set("max_records", String(Math.min(options.limit, 25)));
+  if (options.from) url.searchParams.set("start_year", String(options.from));
+  if (options.to) url.searchParams.set("end_year", String(options.to));
+
+  const body = await call("ieee", url.toString(), {});
+  return (body.articles || []).map((article) =>
+    ground({
+      id: `ieee:${article.article_number}`,
+      type: article.content_type === "Conferences" ? "paper-conference" : "article-journal",
+      title: article.title || "",
+      author: (article.authors?.authors || []).map((a) => splitName(a.full_name)).filter(Boolean),
+      issued: issuedFromDate(article.publication_date) || (article.publication_year ? { "date-parts": [[Number(article.publication_year)]] } : undefined),
+      "container-title": article.publication_title || undefined,
+      volume: article.volume || undefined,
+      issue: article.issue || undefined,
+      page: article.start_page && article.end_page ? `${article.start_page}-${article.end_page}` : article.start_page || undefined,
+      DOI: article.doi || undefined,
+      URL: article.html_url || (article.doi ? `https://doi.org/${article.doi}` : undefined),
+      abstract: article.abstract || undefined,
+      custom: {
+        suniv: { sources: ["ieee"], citedBy: article.citing_paper_count, ieeeArticleNumber: article.article_number },
+      },
+    }),
+  );
+}
+
+function parseArgs(argv) {
+  const options = { limit: 20, source: "all", _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const next = () => argv[++i];
+    switch (arg) {
+      case "-h":
+      case "--help":
+        return { help: true };
+      case "--status":
+        options.status = true;
+        break;
+      case "--source":
+        options.source = next();
+        break;
+      case "--limit":
+        options.limit = Number.parseInt(next(), 10);
+        break;
+      case "--from":
+        options.from = Number.parseInt(next(), 10);
+        break;
+      case "--to":
+        options.to = Number.parseInt(next(), 10);
+        break;
+      case "--csl":
+        options.csl = true;
+        break;
+      default:
+        if (arg.startsWith("--")) return { error: `unknown option ${arg}` };
+        options._.push(arg);
+    }
+  }
+  options.query = options._.join(" ").trim();
+  if (!["all", "scopus", "ieee"].includes(options.source)) return { error: "--source must be scopus, ieee or all" };
+  return { options };
+}
+
+function status() {
+  return {
+    scopus: {
+      key: Boolean(process.env[SCOPUS_KEY]),
+      institutionalToken: Boolean(process.env[SCOPUS_TOKEN]),
+      note: "Elsevier binds this key to the institution's IP ranges; it fails off campus even when valid.",
+    },
+    ieee: { key: Boolean(process.env[IEEE_KEY]) },
+    alternative: "suniv-search needs no subscription and covers most of the same literature.",
+  };
+}
+
+async function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.help) {
+    process.stdout.write(`${USAGE}\n`);
+    return 0;
+  }
+  if (parsed.error) {
+    process.stderr.write(`suniv-indexed: ${parsed.error}\n\n${USAGE}\n`);
+    return 2;
+  }
+  const { options } = parsed;
+  if (options.status) {
+    process.stdout.write(`${JSON.stringify(status(), null, 2)}\n`);
+    return 0;
+  }
+  if (!options.query) {
+    process.stderr.write(`suniv-indexed: a query is required\n\n${USAGE}\n`);
+    return 2;
+  }
+
+  const wanted = options.source === "all" ? ["scopus", "ieee"] : [options.source];
+  const runners = { scopus, ieee };
+  const settled = await Promise.allSettled(wanted.map((name) => runners[name](options.query, options)));
+
+  const items = [];
+  const unavailable = [];
+  for (const [index, outcome] of settled.entries()) {
+    if (outcome.status === "fulfilled") items.push(...outcome.value);
+    else {
+      unavailable.push({
+        source: wanted[index],
+        reason: outcome.reason?.message || String(outcome.reason),
+        remedy: outcome.reason?.remedy,
+      });
+    }
+  }
+
+  if (!items.length && unavailable.length === wanted.length) {
+    process.stderr.write(
+      `suniv-indexed: no subscription index answered.\n${unavailable
+        .map((u) => `  ${u.source}: ${u.reason}${u.remedy ? `\n    ${u.remedy}` : ""}`)
+        .join("\n")}\nsuniv-search covers most of this literature without a subscription.\n`,
+    );
+    return 1;
+  }
+
+  if (options.csl) {
+    process.stdout.write(`${JSON.stringify(items, null, 2)}\n`);
+    return 0;
+  }
+  process.stdout.write(`${JSON.stringify({ query: options.query, count: items.length, items, unavailable }, null, 2)}\n`);
+  return 0;
+}
+
+process.exitCode = await main();

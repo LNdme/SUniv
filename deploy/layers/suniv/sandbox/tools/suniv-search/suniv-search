@@ -1,7 +1,651 @@
 #!/usr/bin/env node
-import { DEFAULT_SOURCES, SOURCES, unpaywall } from "./lib/sources.mjs";
-import { dedupe, GROUNDING, hasOpenAccessLink, normalizeDoi, resolveGrounding, yearOf } from "./lib/csl.mjs";
-import { contactEmail } from "./lib/http.mjs";
+const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+
+function contactEmail() {
+  return process.env.SUNIV_CONTACT_EMAIL || "";
+}
+
+function userAgent() {
+  const mail = contactEmail();
+  return mail ? `SUniv/1.0 (mailto:${mail})` : "SUniv/1.0";
+}
+
+class SourceError extends Error {
+  constructor(source, message) {
+    super(message);
+    this.source = source;
+  }
+}
+
+async function once(url, { headers = {}, timeoutMs = 20000, accept = "application/json", method, body }) {
+  const control = new AbortController();
+  const timer = setTimeout(() => control.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      method: method || (body ? "POST" : "GET"),
+      body,
+      headers: { accept, "user-agent": userAgent(), ...headers },
+      signal: control.signal,
+      redirect: "follow",
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchText(source, url, options = {}) {
+  const attempts = options.attempts ?? 3;
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 400 * 2 ** (attempt - 1)));
+    let response;
+    try {
+      response = await once(url, options);
+    } catch (err) {
+      lastError = new SourceError(source, err.name === "AbortError" ? "timed out" : err.message);
+      continue;
+    }
+    if (response.ok) return await response.text();
+    if (!RETRYABLE.has(response.status)) {
+      throw new SourceError(source, `HTTP ${response.status} ${response.statusText}`.trim());
+    }
+    lastError = new SourceError(source, `HTTP ${response.status} after ${attempt + 1} attempt(s)`);
+  }
+  throw lastError;
+}
+
+async function fetchJson(source, url, options = {}) {
+  const body = await fetchText(source, url, options);
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new SourceError(source, "response was not JSON");
+  }
+}
+
+function normalizeDoi(value) {
+  if (!value) return "";
+  return String(value)
+    .trim()
+    .replace(/^https?:\/\/(dx\.)?doi\.org\//i, "")
+    .replace(/^doi:/i, "")
+    .toLowerCase();
+}
+
+function titleKey(title) {
+  if (!title) return "";
+  return String(title)
+    .toLowerCase()
+    .replace(/<[^>]+>/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function stripMarkup(text) {
+  if (!text) return "";
+  return String(text)
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function splitName(display) {
+  const clean = String(display || "").trim();
+  if (!clean) return null;
+  if (clean.includes(",")) {
+    const [family, given] = clean.split(",", 2);
+    return { family: family.trim(), given: (given || "").trim() };
+  }
+  const parts = clean.split(/\s+/);
+  if (parts.length === 1) return { family: parts[0] };
+  return { family: parts.at(-1), given: parts.slice(0, -1).join(" ") };
+}
+
+function issuedFrom(year, month, day) {
+  const y = Number.parseInt(year, 10);
+  if (!Number.isFinite(y)) return undefined;
+  const parts = [y];
+  const m = Number.parseInt(month, 10);
+  if (Number.isFinite(m)) {
+    parts.push(m);
+    const d = Number.parseInt(day, 10);
+    if (Number.isFinite(d)) parts.push(d);
+  }
+  return { "date-parts": [parts] };
+}
+
+function issuedFromDate(value) {
+  const match = /^(\d{4})(?:-(\d{2}))?(?:-(\d{2}))?/.exec(String(value || ""));
+  if (!match) return undefined;
+  return issuedFrom(match[1], match[2], match[3]);
+}
+
+function reconstructInvertedAbstract(index) {
+  if (!index || typeof index !== "object") return "";
+  const slots = [];
+  for (const [word, positions] of Object.entries(index)) {
+    if (!Array.isArray(positions)) continue;
+    for (const position of positions) slots[position] = word;
+  }
+  const text = slots.filter((word) => typeof word === "string").join(" ").trim();
+  return text.length >= 40 ? text : "";
+}
+
+function yearOf(item) {
+  const parts = item?.issued?.["date-parts"]?.[0];
+  return Array.isArray(parts) ? parts[0] : undefined;
+}
+
+function suniv(item) {
+  item.custom = item.custom || {};
+  item.custom.suniv = item.custom.suniv || { sources: [] };
+  return item.custom.suniv;
+}
+
+function markSource(item, source) {
+  const meta = suniv(item);
+  if (!meta.sources.includes(source)) meta.sources.push(source);
+  return item;
+}
+
+function preferLonger(current, candidate) {
+  if (!candidate) return current;
+  if (!current) return candidate;
+  return String(candidate).length > String(current).length ? candidate : current;
+}
+
+function mergeItems(base, incoming) {
+  const merged = { ...base };
+  for (const [key, value] of Object.entries(incoming)) {
+    if (value === undefined || value === null || value === "") continue;
+    if (key === "custom") continue;
+    if (key === "abstract" || key === "title") {
+      merged[key] = preferLonger(merged[key], value);
+      continue;
+    }
+    if (key === "author") {
+      if (!Array.isArray(merged.author) || merged.author.length < value.length) merged.author = value;
+      continue;
+    }
+    if (merged[key] === undefined) merged[key] = value;
+  }
+  const meta = suniv(merged);
+  const incomingMeta = incoming?.custom?.suniv;
+  if (incomingMeta) {
+    for (const source of incomingMeta.sources || []) {
+      if (!meta.sources.includes(source)) meta.sources.push(source);
+    }
+    if (incomingMeta.citedBy !== undefined && (meta.citedBy === undefined || incomingMeta.citedBy > meta.citedBy)) {
+      meta.citedBy = incomingMeta.citedBy;
+    }
+    for (const key of ["openAccessUrl", "pdfUrl", "openAccessStatus", "arxivId", "pmcid"]) {
+      if (meta[key] === undefined && incomingMeta[key] !== undefined) meta[key] = incomingMeta[key];
+    }
+  }
+  return merged;
+}
+
+function dedupe(items) {
+  const byDoi = new Map();
+  const byTitle = new Map();
+  const ordered = [];
+
+  for (const item of items) {
+    const doi = normalizeDoi(item.DOI);
+    const key = titleKey(item.title);
+    const existingIndex = (doi && byDoi.get(doi)) ?? (key && byTitle.get(key));
+    if (existingIndex !== undefined) {
+      ordered[existingIndex] = mergeItems(ordered[existingIndex], item);
+      const settled = ordered[existingIndex];
+      const settledDoi = normalizeDoi(settled.DOI);
+      if (settledDoi) byDoi.set(settledDoi, existingIndex);
+      const settledKey = titleKey(settled.title);
+      if (settledKey) byTitle.set(settledKey, existingIndex);
+      continue;
+    }
+    const index = ordered.push(item) - 1;
+    if (doi) byDoi.set(doi, index);
+    if (key) byTitle.set(key, index);
+  }
+  return ordered;
+}
+
+const GROUNDING = {
+  fulltext: "fulltext",
+  abstract: "abstract",
+  metadata: "metadata",
+};
+
+const CITEKEY_STOPWORDS = new Set([
+  "the", "and", "for", "with", "from", "into", "using", "based", "towards", "toward", "study",
+  "analysis", "novel", "approach", "their", "that", "this", "these", "those", "over", "under",
+  "about", "between", "through", "against", "during", "within", "without", "have", "been",
+]);
+
+function citekeyFor(item) {
+  const family = String(item.author?.[0]?.family || "anon")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[^a-z]/g, "");
+  const year = yearOf(item) ?? "nd";
+  const word =
+    String(item.title || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .find((token) => token.length > 3 && !CITEKEY_STOPWORDS.has(token)) || "untitled";
+  return `${family || "anon"}${year}${word}`;
+}
+
+function assignCitekeys(items) {
+  const taken = new Map();
+  for (const item of items) {
+    const base = citekeyFor(item);
+    const seen = taken.get(base) ?? 0;
+    taken.set(base, seen + 1);
+    const key = seen === 0 ? base : `${base}${String.fromCharCode(97 + seen)}`;
+    const meta = suniv(item);
+    meta.recordId = item.id;
+    item.id = key;
+  }
+  return items;
+}
+
+function hasOpenAccessLink(item) {
+  const meta = item?.custom?.suniv;
+  return Boolean(meta?.pdfUrl || meta?.openAccessUrl);
+}
+
+function isRetrievableText(item) {
+  const meta = item?.custom?.suniv;
+  return Boolean(meta?.pdfUrl || meta?.pmcid || meta?.arxivId);
+}
+
+function resolveGrounding(item) {
+  const meta = suniv(item);
+  if (isRetrievableText(item)) meta.grounding = GROUNDING.fulltext;
+  else if (item.abstract && String(item.abstract).length >= 40) meta.grounding = GROUNDING.abstract;
+  else meta.grounding = GROUNDING.metadata;
+  if (meta.grounding === GROUNDING.metadata) {
+    meta.groundingNote =
+      "Metadata only: no abstract and no open-access full text reached. Do not describe this work's objective or method — say the text was not available and offer the DOI so the reader can obtain it through their library.";
+  } else if (meta.grounding === GROUNDING.abstract) {
+    meta.groundingNote = hasOpenAccessLink(item)
+      ? "Abstract only so far: an open-access landing page exists but no retrievable text. Describe the method the abstract states, attributed as such, and offer to open the landing page."
+      : "Abstract only: describe the method the abstract states, attributed as such. Do not infer design details the abstract does not contain.";
+  } else {
+    meta.groundingNote = "Retrievable open-access text; read it before describing the method, and cite its sections.";
+  }
+  return item;
+}
+
+
+const OPENALEX_TYPE_TO_CSL = {
+  article: "article-journal",
+  "journal-article": "article-journal",
+  "book-chapter": "chapter",
+  book: "book",
+  dissertation: "thesis",
+  "proceedings-article": "paper-conference",
+  preprint: "article",
+  dataset: "dataset",
+  report: "report",
+};
+
+function withParams(base, params) {
+  const url = new URL(base);
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === "") continue;
+    url.searchParams.set(key, String(value));
+  }
+  return url.toString();
+}
+
+function politeParam() {
+  const mail = contactEmail();
+  return mail ? { mailto: mail } : {};
+}
+
+async function openalex(query, options) {
+  const filters = ["type:article|review|preprint|book-chapter|dissertation"];
+  if (options.from) filters.push(`from_publication_date:${options.from}-01-01`);
+  if (options.to) filters.push(`to_publication_date:${options.to}-12-31`);
+  if (options.openAccess) filters.push("is_oa:true");
+
+  const url = withParams("https://api.openalex.org/works", {
+    search: query,
+    filter: filters.join(","),
+    per_page: Math.min(Math.max(options.limit * 2, 25), 50),
+    ...politeParam(),
+  });
+
+  const body = await fetchJson("openalex", url);
+  return (body.results || []).map((work) => {
+    const access = work.open_access || {};
+    const openLocation = access.is_oa ? work.best_oa_location || {} : {};
+    const item = {
+      id: `openalex:${String(work.id || "").split("/").pop()}`,
+      type: OPENALEX_TYPE_TO_CSL[work.type] || "article-journal",
+      title: stripMarkup(work.display_name),
+      author: (work.authorships || [])
+        .map((a) => splitName(a.author?.display_name))
+        .filter(Boolean),
+      issued: issuedFromDate(work.publication_date) || issuedFrom(work.publication_year),
+      "container-title": work.primary_location?.source?.display_name || undefined,
+      publisher: work.primary_location?.source?.host_organization_name || undefined,
+      volume: work.biblio?.volume || undefined,
+      issue: work.biblio?.issue || undefined,
+      page:
+        work.biblio?.first_page && work.biblio?.last_page
+          ? `${work.biblio.first_page}-${work.biblio.last_page}`
+          : work.biblio?.first_page || undefined,
+      DOI: normalizeDoi(work.doi) || undefined,
+      URL: work.doi || work.id || undefined,
+      abstract: reconstructInvertedAbstract(work.abstract_inverted_index) || undefined,
+      custom: {
+        suniv: {
+          sources: [],
+          citedBy: work.cited_by_count,
+          openAccessStatus: access.oa_status,
+          openAccessUrl: access.oa_url || openLocation.landing_page_url || undefined,
+          pdfUrl: openLocation.pdf_url || undefined,
+        },
+      },
+    };
+    return markSource(item, "openalex");
+  });
+}
+
+async function crossref(query, options) {
+  const filters = [];
+  if (options.from) filters.push(`from-pub-date:${options.from}-01-01`);
+  if (options.to) filters.push(`until-pub-date:${options.to}-12-31`);
+
+  const url = withParams("https://api.crossref.org/works", {
+    query,
+    rows: Math.min(options.limit, 50),
+    filter: filters.join(",") || undefined,
+    select: "DOI,title,author,issued,container-title,publisher,volume,issue,page,abstract,type,URL,is-referenced-by-count",
+    ...politeParam(),
+  });
+
+  const body = await fetchJson("crossref", url);
+  return (body.message?.items || []).map((work) => {
+    const item = {
+      id: `doi:${normalizeDoi(work.DOI)}`,
+      type: work.type === "journal-article" ? "article-journal" : work.type || "article-journal",
+      title: stripMarkup(Array.isArray(work.title) ? work.title[0] : work.title),
+      author: (work.author || [])
+        .map((a) => (a.family ? { family: a.family, given: a.given } : splitName(a.name)))
+        .filter(Boolean),
+      issued: work.issued?.["date-parts"]?.[0] ? { "date-parts": work.issued["date-parts"] } : undefined,
+      "container-title": Array.isArray(work["container-title"]) ? work["container-title"][0] : undefined,
+      publisher: work.publisher || undefined,
+      volume: work.volume || undefined,
+      issue: work.issue || undefined,
+      page: work.page || undefined,
+      DOI: normalizeDoi(work.DOI) || undefined,
+      URL: work.URL || undefined,
+      abstract: stripMarkup(work.abstract) || undefined,
+      custom: { suniv: { sources: [], citedBy: work["is-referenced-by-count"] } },
+    };
+    return markSource(item, "crossref");
+  });
+}
+
+function arxivEntries(xml) {
+  return xml.split("<entry>").slice(1).map((chunk) => chunk.split("</entry>")[0]);
+}
+
+function tagText(chunk, tag) {
+  const match = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`).exec(chunk);
+  if (!match) return "";
+  return stripMarkup(
+    match[1]
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, "&"),
+  );
+}
+
+function tagAll(chunk, tag) {
+  const out = [];
+  const re = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, "g");
+  let match;
+  while ((match = re.exec(chunk)) !== null) out.push(stripMarkup(match[1]));
+  return out;
+}
+
+async function arxiv(query, options) {
+  const url = withParams("https://export.arxiv.org/api/query", {
+    search_query: `all:${query}`,
+    max_results: Math.min(options.limit, 50),
+    sortBy: "relevance",
+  });
+
+  const xml = await fetchText("arxiv", url, { accept: "application/atom+xml" });
+  return arxivEntries(xml).map((chunk) => {
+    const absUrl = tagText(chunk, "id");
+    const arxivId = absUrl.split("/abs/").pop();
+    const doiField = tagText(chunk, "arxiv:doi");
+    const item = {
+      id: `arxiv:${arxivId}`,
+      type: "article",
+      title: tagText(chunk, "title"),
+      author: tagAll(chunk, "name").map(splitName).filter(Boolean),
+      issued: issuedFromDate(tagText(chunk, "published")),
+      "container-title": "arXiv",
+      DOI: normalizeDoi(doiField) || undefined,
+      URL: absUrl || undefined,
+      abstract: tagText(chunk, "summary") || undefined,
+      custom: {
+        suniv: {
+          sources: [],
+          arxivId,
+          openAccessUrl: absUrl || undefined,
+          pdfUrl: arxivId ? `https://arxiv.org/pdf/${arxivId}` : undefined,
+        },
+      },
+    };
+    return markSource(item, "arxiv");
+  });
+}
+
+async function semanticscholar(query, options) {
+  const fields = [
+    "title",
+    "abstract",
+    "year",
+    "publicationDate",
+    "venue",
+    "externalIds",
+    "authors",
+    "citationCount",
+    "openAccessPdf",
+    "publicationTypes",
+  ].join(",");
+  const url = withParams("https://api.semanticscholar.org/graph/v1/paper/search", {
+    query,
+    limit: Math.min(options.limit, 50),
+    fields,
+    year: options.from || options.to ? `${options.from || ""}-${options.to || ""}` : undefined,
+  });
+  const key = process.env.SEMANTIC_SCHOLAR_API_KEY;
+  let body;
+  try {
+    body = await fetchJson("semanticscholar", url, key ? { headers: { "x-api-key": key } } : {});
+  } catch (err) {
+    if (!key && /429/.test(err.message)) {
+      throw new SourceError(
+        "semanticscholar",
+        "SEMANTIC_SCHOLAR_API_KEY is not set and the shared anonymous pool refused the request (429) — request a free key at semanticscholar.org/product/api",
+      );
+    }
+    throw err;
+  }
+
+  return (body.data || []).map((paper) => {
+    const item = {
+      id: `s2:${paper.paperId}`,
+      type: "article-journal",
+      title: stripMarkup(paper.title),
+      author: (paper.authors || []).map((a) => splitName(a.name)).filter(Boolean),
+      issued: issuedFromDate(paper.publicationDate) || issuedFrom(paper.year),
+      "container-title": paper.venue || undefined,
+      DOI: normalizeDoi(paper.externalIds?.DOI) || undefined,
+      URL: paper.externalIds?.DOI ? `https://doi.org/${paper.externalIds.DOI}` : undefined,
+      abstract: paper.abstract || undefined,
+      custom: {
+        suniv: {
+          sources: [],
+          citedBy: paper.citationCount,
+          pdfUrl: paper.openAccessPdf?.url || undefined,
+          arxivId: paper.externalIds?.ArXiv || undefined,
+        },
+      },
+    };
+    return markSource(item, "semanticscholar");
+  });
+}
+
+async function europepmc(query, options) {
+  const bounded = [query];
+  if (options.from) bounded.push(`FIRST_PDATE:[${options.from}-01-01 TO ${options.to || 3000}-12-31]`);
+  const url = withParams("https://www.ebi.ac.uk/europepmc/webservices/rest/search", {
+    query: bounded.join(" AND "),
+    format: "json",
+    pageSize: Math.min(options.limit, 50),
+    resultType: "core",
+  });
+
+  const body = await fetchJson("europepmc", url);
+  return (body.resultList?.result || []).map((record) => {
+    const isOpen = record.isOpenAccess === "Y" && record.pmcid;
+    const item = {
+      id: record.doi ? `doi:${normalizeDoi(record.doi)}` : `epmc:${record.id}`,
+      type: "article-journal",
+      title: stripMarkup(record.title),
+      author: String(record.authorString || "")
+        .split(",")
+        .map((name) => splitName(name))
+        .filter(Boolean),
+      issued: issuedFromDate(record.firstPublicationDate) || issuedFrom(record.pubYear),
+      "container-title": record.journalTitle || undefined,
+      volume: record.journalVolume || undefined,
+      issue: record.issue || undefined,
+      page: record.pageInfo || undefined,
+      DOI: normalizeDoi(record.doi) || undefined,
+      URL: record.doi ? `https://doi.org/${record.doi}` : undefined,
+      abstract: stripMarkup(record.abstractText) || undefined,
+      custom: {
+        suniv: {
+          sources: [],
+          citedBy: record.citedByCount,
+          pmcid: record.pmcid || undefined,
+          openAccessUrl: isOpen ? `https://europepmc.org/article/PMC/${record.pmcid}` : undefined,
+          pdfUrl: isOpen
+            ? `https://www.ebi.ac.uk/europepmc/webservices/rest/${record.pmcid}/fullTextXML`
+            : undefined,
+        },
+      },
+    };
+    return markSource(item, "europepmc");
+  });
+}
+
+async function hal(query, options) {
+  const filters = [];
+  if (options.from) filters.push(`producedDateY_i:[${options.from} TO ${options.to || "*"}]`);
+  const url = withParams("https://api.archives-ouvertes.fr/search/", {
+    q: query,
+    fq: filters.join(" AND ") || undefined,
+    wt: "json",
+    rows: Math.min(options.limit, 50),
+    fl: "docid,label_s,title_s,authFullName_s,producedDateY_i,journalTitle_s,doiId_s,uri_s,abstract_s,fileMain_s,openAccess_bool",
+  });
+
+  const body = await fetchJson("hal", url);
+  return (body.response?.docs || []).map((doc) => {
+    const item = {
+      id: `hal:${doc.docid}`,
+      type: "article-journal",
+      title: stripMarkup(Array.isArray(doc.title_s) ? doc.title_s[0] : doc.title_s),
+      author: (doc.authFullName_s || []).map(splitName).filter(Boolean),
+      issued: issuedFrom(doc.producedDateY_i),
+      "container-title": doc.journalTitle_s || undefined,
+      DOI: normalizeDoi(doc.doiId_s) || undefined,
+      URL: doc.uri_s || undefined,
+      abstract: stripMarkup(Array.isArray(doc.abstract_s) ? doc.abstract_s[0] : doc.abstract_s) || undefined,
+      custom: {
+        suniv: {
+          sources: [],
+          openAccessUrl: doc.openAccess_bool ? doc.uri_s : undefined,
+          pdfUrl: doc.fileMain_s || undefined,
+        },
+      },
+    };
+    return markSource(item, "hal");
+  });
+}
+
+async function core(query, options) {
+  const key = process.env.CORE_API_KEY;
+  if (!key) throw new SourceError("core", "CORE_API_KEY is not set — skipped (register at core.ac.uk/services/api)");
+
+  const body = await fetchJson("core", "https://api.core.ac.uk/v3/search/works", {
+    method: "POST",
+    headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+    body: JSON.stringify({ q: query, limit: Math.min(options.limit, 50) }),
+  });
+
+  return (body.results || []).map((work) => {
+    const item = {
+      id: `core:${work.id}`,
+      type: "article-journal",
+      title: stripMarkup(work.title),
+      author: (work.authors || []).map((a) => splitName(a.name)).filter(Boolean),
+      issued: issuedFromDate(work.publishedDate) || issuedFrom(work.yearPublished),
+      "container-title": work.publisher || undefined,
+      DOI: normalizeDoi(work.doi) || undefined,
+      URL: work.doi ? `https://doi.org/${work.doi}` : work.sourceFulltextUrls?.[0],
+      abstract: stripMarkup(work.abstract) || undefined,
+      custom: {
+        suniv: { sources: [], pdfUrl: work.downloadUrl || work.sourceFulltextUrls?.[0] || undefined },
+      },
+    };
+    return markSource(item, "core");
+  });
+}
+
+async function unpaywall(doi) {
+  const mail = contactEmail();
+  if (!mail) throw new SourceError("unpaywall", "SUNIV_CONTACT_EMAIL is not set — Unpaywall requires an email");
+  const url = withParams(`https://api.unpaywall.org/v2/${encodeURIComponent(doi)}`, { email: mail });
+  const body = await fetchJson("unpaywall", url);
+  const best = body.best_oa_location;
+  if (!best) return null;
+  return {
+    openAccessUrl: best.url_for_landing_page || best.url || undefined,
+    pdfUrl: best.url_for_pdf || undefined,
+    openAccessStatus: body.oa_status || undefined,
+  };
+}
+
+const SOURCES = {
+  openalex,
+  crossref,
+  arxiv,
+  semanticscholar,
+  europepmc,
+  hal,
+  core,
+};
+
+const DEFAULT_SOURCES = ["openalex", "crossref", "arxiv", "semanticscholar", "europepmc"];
+
 
 const USAGE = `usage: suniv-search <query> [options]
 
@@ -161,7 +805,7 @@ async function main() {
   if (options.fulltext) await addOpenAccessLinks(items);
   items.forEach(resolveGrounding);
   if (options.openAccess) items = items.filter(hasOpenAccessLink);
-  items = sortItems(items, options.sort).slice(0, options.limit);
+  items = assignCitekeys(sortItems(items, options.sort).slice(0, options.limit));
 
   if (options.csl) {
     process.stdout.write(`${JSON.stringify(items, null, 2)}\n`);

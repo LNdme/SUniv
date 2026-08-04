@@ -1,0 +1,227 @@
+#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { extname, join } from "node:path";
+
+const USAGE = `usage: suniv-doc <command> [options]
+
+  check                                 report which document binaries are installed
+  convert --input IN --output OUT       markdown, docx, tex and pdf in any direction
+          [--bib refs.json]             CSL-JSON or BibTeX bibliography
+          [--csl style.csl]             citation style (default the CSL default)
+          [--reference-doc tpl.docx]    keep a university's Word template
+  bib --input works.json --output OUT   CSL-JSON to BibTeX, or the reverse
+  text --input paper.pdf                extract text, one page per form feed
+
+The student keeps writing in Word, LaTeX or Overleaf; this moves the document
+between those worlds instead of replacing them.`;
+
+const REQUIREMENTS = {
+  pandoc: {
+    provides: "markdown, docx and tex conversion, and citation rendering",
+    install: "apt-get install pandoc (Debian) or brew install pandoc (macOS)",
+  },
+  latexmk: {
+    provides: "PDF export through LaTeX",
+    install: "apt-get install latexmk texlive-latex-recommended texlive-latex-extra",
+  },
+  pdftotext: {
+    provides: "reading the text of a PDF",
+    install: "apt-get install poppler-utils (Debian) or brew install poppler (macOS)",
+  },
+};
+
+function have(binary) {
+  return (process.env.PATH || "").split(":").some((dir) => dir && existsSync(join(dir, binary)));
+}
+
+function requireBinary(binary) {
+  if (have(binary)) return;
+  const need = REQUIREMENTS[binary];
+  throw new Error(
+    `${binary} is not installed in this sandbox, so ${need.provides} is unavailable.\n` +
+      `Install it with: ${need.install}\n` +
+      `In a deployment, add it to the layer's sandbox image rather than installing it per turn.`,
+  );
+}
+
+function run(binary, args) {
+  const result = spawnSync(binary, args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  if (result.error) throw new Error(`${binary}: ${result.error.message}`);
+  if (result.status !== 0) {
+    throw new Error(`${binary} exited ${result.status}\n${(result.stderr || "").slice(0, 2000)}`);
+  }
+  return result.stdout;
+}
+
+function formatOf(path) {
+  const ext = extname(path).toLowerCase();
+  if (ext === ".md" || ext === ".markdown") return "markdown";
+  if (ext === ".docx") return "docx";
+  if (ext === ".tex" || ext === ".latex") return "latex";
+  if (ext === ".pdf") return "pdf";
+  if (ext === ".html" || ext === ".htm") return "html";
+  if (ext === ".odt") return "odt";
+  if (ext === ".json") return "csljson";
+  if (ext === ".bib") return "biblatex";
+  return null;
+}
+
+function bibliographyArgs(options) {
+  if (!options.bib) return [];
+  if (!existsSync(options.bib)) throw new Error(`bibliography not found: ${options.bib}`);
+  const args = ["--citeproc", "--bibliography", options.bib];
+  if (options.csl) {
+    if (!existsSync(options.csl)) throw new Error(`CSL style not found: ${options.csl}`);
+    args.push("--csl", options.csl);
+  }
+  return args;
+}
+
+function commandCheck() {
+  const report = {};
+  for (const [binary, need] of Object.entries(REQUIREMENTS)) {
+    report[binary] = { installed: have(binary), provides: need.provides, install: need.install };
+  }
+  const missing = Object.entries(report).filter(([, r]) => !r.installed).map(([b]) => b);
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        binaries: report,
+        usable: !missing.length,
+        note: missing.length
+          ? `Missing: ${missing.join(", ")}. Say so plainly rather than producing a document the student cannot open.`
+          : "All document conversions are available.",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  return 0;
+}
+
+function commandConvert(options) {
+  if (!options.input || !options.output) throw new Error("convert needs --input and --output");
+  if (!existsSync(options.input)) throw new Error(`input not found: ${options.input}`);
+  requireBinary("pandoc");
+
+  const from = formatOf(options.input);
+  const to = formatOf(options.output);
+  if (!from) throw new Error(`cannot tell the format of ${options.input} from its extension`);
+  if (!to) throw new Error(`cannot tell the format of ${options.output} from its extension`);
+  if (from === "pdf") throw new Error("PDF is an output format here; use `suniv-doc text` to read one");
+
+  const args = [options.input, "-o", options.output, ...bibliographyArgs(options)];
+  if (options.referenceDoc) {
+    if (!existsSync(options.referenceDoc)) throw new Error(`reference document not found: ${options.referenceDoc}`);
+    args.push("--reference-doc", options.referenceDoc);
+  }
+  if (to === "pdf") {
+    requireBinary("latexmk");
+    args.push("--pdf-engine", "latexmk");
+  }
+  if (from === "markdown") args.push("--from", "markdown+tex_math_dollars+raw_tex");
+
+  run("pandoc", args);
+  process.stdout.write(
+    `${JSON.stringify({ input: options.input, output: options.output, from, to, bibliography: options.bib || null }, null, 2)}\n`,
+  );
+  return 0;
+}
+
+function commandBib(options) {
+  if (!options.input || !options.output) throw new Error("bib needs --input and --output");
+  if (!existsSync(options.input)) throw new Error(`input not found: ${options.input}`);
+  requireBinary("pandoc");
+
+  const from = formatOf(options.input);
+  const to = formatOf(options.output);
+  if (from === "csljson" && to === "csljson") throw new Error("input and output are both CSL-JSON");
+
+  const source = from === "csljson" ? JSON.parse(readFileSync(options.input, "utf8")) : null;
+  let inputPath = options.input;
+  if (Array.isArray(source?.items)) {
+    inputPath = `${options.input}.items.json`;
+    writeFileSync(inputPath, JSON.stringify(source.items));
+  }
+
+  run("pandoc", [inputPath, "--from", from === "csljson" ? "csljson" : "biblatex", "--to", to === "csljson" ? "csljson" : "biblatex", "-o", options.output]);
+  process.stdout.write(`${JSON.stringify({ input: options.input, output: options.output }, null, 2)}\n`);
+  return 0;
+}
+
+function commandText(options) {
+  if (!options.input) throw new Error("text needs --input");
+  if (!existsSync(options.input)) throw new Error(`input not found: ${options.input}`);
+  requireBinary("pdftotext");
+  process.stdout.write(run("pdftotext", ["-layout", options.input, "-"]));
+  return 0;
+}
+
+function parseArgs(argv) {
+  const options = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const next = () => argv[++i];
+    switch (arg) {
+      case "-h":
+      case "--help":
+        return { help: true };
+      case "--input":
+        options.input = next();
+        break;
+      case "--output":
+        options.output = next();
+        break;
+      case "--bib":
+        options.bib = next();
+        break;
+      case "--csl":
+        options.csl = next();
+        break;
+      case "--reference-doc":
+        options.referenceDoc = next();
+        break;
+      default:
+        if (arg.startsWith("--")) return { error: `unknown option ${arg}` };
+        options._.push(arg);
+    }
+  }
+  return { options };
+}
+
+function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.help) {
+    process.stdout.write(`${USAGE}\n`);
+    return 0;
+  }
+  if (parsed.error) {
+    process.stderr.write(`suniv-doc: ${parsed.error}\n\n${USAGE}\n`);
+    return 2;
+  }
+
+  const { options } = parsed;
+  const [command] = options._;
+  try {
+    switch (command) {
+      case undefined:
+      case "check":
+        return commandCheck();
+      case "convert":
+        return commandConvert(options);
+      case "bib":
+        return commandBib(options);
+      case "text":
+        return commandText(options);
+      default:
+        process.stderr.write(`suniv-doc: unknown command "${command}"\n\n${USAGE}\n`);
+        return 2;
+    }
+  } catch (err) {
+    process.stderr.write(`suniv-doc: ${err.message}\n`);
+    return 1;
+  }
+}
+
+process.exitCode = main();
