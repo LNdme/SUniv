@@ -127,7 +127,10 @@ function reconstructInvertedAbstract(index) {
     if (!Array.isArray(positions)) continue;
     for (const position of positions) slots[position] = word;
   }
-  const text = slots.filter((word) => typeof word === "string").join(" ").trim();
+  const text = slots
+    .filter((word) => typeof word === "string")
+    .join(" ")
+    .trim();
   return text.length >= 40 ? text : "";
 }
 
@@ -217,9 +220,36 @@ const GROUNDING = {
 };
 
 const CITEKEY_STOPWORDS = new Set([
-  "the", "and", "for", "with", "from", "into", "using", "based", "towards", "toward", "study",
-  "analysis", "novel", "approach", "their", "that", "this", "these", "those", "over", "under",
-  "about", "between", "through", "against", "during", "within", "without", "have", "been",
+  "the",
+  "and",
+  "for",
+  "with",
+  "from",
+  "into",
+  "using",
+  "based",
+  "towards",
+  "toward",
+  "study",
+  "analysis",
+  "novel",
+  "approach",
+  "their",
+  "that",
+  "this",
+  "these",
+  "those",
+  "over",
+  "under",
+  "about",
+  "between",
+  "through",
+  "against",
+  "during",
+  "within",
+  "without",
+  "have",
+  "been",
 ]);
 
 function citekeyFor(item) {
@@ -280,7 +310,6 @@ function resolveGrounding(item) {
   return item;
 }
 
-
 const OPENALEX_TYPE_TO_CSL = {
   article: "article-journal",
   "journal-article": "article-journal",
@@ -325,12 +354,12 @@ async function openalex(query, options) {
     const access = work.open_access || {};
     const openLocation = access.is_oa ? work.best_oa_location || {} : {};
     const item = {
-      id: `openalex:${String(work.id || "").split("/").pop()}`,
+      id: `openalex:${String(work.id || "")
+        .split("/")
+        .pop()}`,
       type: OPENALEX_TYPE_TO_CSL[work.type] || "article-journal",
       title: stripMarkup(work.display_name),
-      author: (work.authorships || [])
-        .map((a) => splitName(a.author?.display_name))
-        .filter(Boolean),
+      author: (work.authorships || []).map((a) => splitName(a.author?.display_name)).filter(Boolean),
       issued: issuedFromDate(work.publication_date) || issuedFrom(work.publication_year),
       "container-title": work.primary_location?.source?.display_name || undefined,
       publisher: work.primary_location?.source?.host_organization_name || undefined,
@@ -366,7 +395,8 @@ async function crossref(query, options) {
     query,
     rows: Math.min(options.limit, 50),
     filter: filters.join(",") || undefined,
-    select: "DOI,title,author,issued,container-title,publisher,volume,issue,page,abstract,type,URL,is-referenced-by-count",
+    select:
+      "DOI,title,author,issued,container-title,publisher,volume,issue,page,abstract,type,URL,is-referenced-by-count",
     ...politeParam(),
   });
 
@@ -395,7 +425,10 @@ async function crossref(query, options) {
 }
 
 function arxivEntries(xml) {
-  return xml.split("<entry>").slice(1).map((chunk) => chunk.split("</entry>")[0]);
+  return xml
+    .split("<entry>")
+    .slice(1)
+    .map((chunk) => chunk.split("</entry>")[0]);
 }
 
 function tagText(chunk, tag) {
@@ -546,9 +579,7 @@ async function europepmc(query, options) {
           citedBy: record.citedByCount,
           pmcid: record.pmcid || undefined,
           openAccessUrl: isOpen ? `https://europepmc.org/article/PMC/${record.pmcid}` : undefined,
-          pdfUrl: isOpen
-            ? `https://www.ebi.ac.uk/europepmc/webservices/rest/${record.pmcid}/fullTextXML`
-            : undefined,
+          pdfUrl: isOpen ? `https://www.ebi.ac.uk/europepmc/webservices/rest/${record.pmcid}/fullTextXML` : undefined,
         },
       },
     };
@@ -645,7 +676,6 @@ const SOURCES = {
 };
 
 const DEFAULT_SOURCES = ["openalex", "crossref", "arxiv", "semanticscholar", "europepmc"];
-
 
 const USAGE = `usage: suniv-search <query> [options]
 
@@ -758,9 +788,7 @@ async function byDoi(doi) {
 }
 
 async function addOpenAccessLinks(items) {
-  const targets = items.filter(
-    (item) => item.DOI && !item.custom?.suniv?.pdfUrl && !item.custom?.suniv?.openAccessUrl,
-  );
+  const targets = items.filter((item) => item.DOI && !item.custom?.suniv?.pdfUrl && !item.custom?.suniv?.openAccessUrl);
   const resolved = await Promise.allSettled(targets.map((item) => unpaywall(normalizeDoi(item.DOI))));
   resolved.forEach((outcome, index) => {
     if (outcome.status !== "fulfilled" || !outcome.value) return;

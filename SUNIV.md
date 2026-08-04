@@ -18,11 +18,11 @@ l'étudiant et des skills qui apprennent à l'agent quand les employer.
 Tout le reste de l'arbre est du noyau amont et reste **identique à QM**. Trois exceptions,
 et elles sont exhaustives :
 
-| Fichier | Raison |
-|---|---|
+| Fichier     | Raison                                 |
+| ----------- | -------------------------------------- |
 | `README.md` | Une distribution se présente elle-même |
-| `NOTICE` | Attribution MIT du travail amont |
-| `SUNIV.md` | Ce document |
+| `NOTICE`    | Attribution MIT du travail amont       |
+| `SUNIV.md`  | Ce document                            |
 
 Cette discipline n'est pas de la cérémonie : elle est ce qui garde les merges depuis
 l'amont petits. Une correction du noyau appliquée ici est une correction à re-résoudre à

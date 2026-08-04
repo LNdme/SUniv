@@ -51,7 +51,7 @@ and find out:
   a silent one may be silent for a reason worth knowing;
 - what methods this literature accepts, which is what the student will be
   expected to use;
-- whether the gap is real. Search *for* the gap specifically. "Nobody has
+- whether the gap is real. Search _for_ the gap specifically. "Nobody has
   studied X" is the claim most often destroyed in a viva, usually by a paper
   from 2019 the student never found.
 

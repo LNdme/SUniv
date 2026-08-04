@@ -83,7 +83,8 @@ function guessTitle(pages) {
   return titleCased || plausible[0] || "";
 }
 
-const HEADING = /^\s*((?:\d+(?:\.\d+)*)[.)]?\s+[A-Z][^\n]{2,80}|(?:[IVX]+\.)\s+[A-Z][^\n]{2,80}|(?:ABSTRACT|INTRODUCTION|RELATED WORK|BACKGROUND|METHODS?|METHODOLOGY|MATERIALS AND METHODS|EXPERIMENTS?|EXPERIMENTAL SETUP|RESULTS|DISCUSSION|CONCLUSIONS?|REFERENCES|ACKNOWLEDG(?:E)?MENTS?)\s*)$/;
+const HEADING =
+  /^\s*((?:\d+(?:\.\d+)*)[.)]?\s+[A-Z][^\n]{2,80}|(?:[IVX]+\.)\s+[A-Z][^\n]{2,80}|(?:ABSTRACT|INTRODUCTION|RELATED WORK|BACKGROUND|METHODS?|METHODOLOGY|MATERIALS AND METHODS|EXPERIMENTS?|EXPERIMENTAL SETUP|RESULTS|DISCUSSION|CONCLUSIONS?|REFERENCES|ACKNOWLEDG(?:E)?MENTS?)\s*)$/;
 
 function headings(pages) {
   const found = [];
@@ -158,7 +159,10 @@ function commandSearch(options) {
         path: doc.path,
         titleGuess: doc.titleGuess,
         page: pageIndex + 1,
-        passage: page.slice(Math.max(0, at - 160), at + 320).replace(/\s+/g, " ").trim(),
+        passage: page
+          .slice(Math.max(0, at - 160), at + 320)
+          .replace(/\s+/g, " ")
+          .trim(),
       });
     });
   }

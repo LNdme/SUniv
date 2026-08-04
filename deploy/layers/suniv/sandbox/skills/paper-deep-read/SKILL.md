@@ -43,7 +43,7 @@ afternoon.
 3. **The method, step by step.** What goes in, what happens to it, what comes
    out. Name each step's purpose before its mechanics.
 4. **The mathematics, once the shape is clear.** Define every symbol on first
-   use. Say what each equation *does* — this term penalises that, this
+   use. Say what each equation _does_ — this term penalises that, this
    expectation is over that distribution. An equation restated in words is not
    an explanation; an equation whose role is explained is.
 5. **The evaluation.** What is compared to what, on which data, and does the

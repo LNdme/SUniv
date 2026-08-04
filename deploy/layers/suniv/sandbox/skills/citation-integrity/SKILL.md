@@ -15,7 +15,7 @@ Two rules, and they are not negotiable by a student in a hurry.
 ## A reference exists only if a tool returned it
 
 Every reference entering a draft, a bibliography, a literature matrix or a
-Zotero collection must trace to a record returned in *this* conversation by
+Zotero collection must trace to a record returned in _this_ conversation by
 `suniv-search`, `suniv-indexed`, or `suniv-lib`. Model recall does not count.
 Recall reliably produces plausible titles attached to real authors with DOIs
 that resolve to something else entirely — the failure looks exactly like success.
@@ -38,11 +38,11 @@ right". If it does not match what the tool returned, the tool is right.
 Every result carries `custom.suniv.grounding`, which states what SUniv actually
 holds of the work. It governs what you may write:
 
-| Grounding | What you may say |
-| --- | --- |
-| `fulltext` | Anything the text supports. Read it first — `suniv-lib text`, or fetch the open-access copy. Attribute claims to the section they come from. |
+| Grounding  | What you may say                                                                                                                                                               |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `fulltext` | Anything the text supports. Read it first — `suniv-lib text`, or fetch the open-access copy. Attribute claims to the section they come from.                                   |
 | `abstract` | Only what the abstract states, marked as such: "the abstract reports…". Never the sample size, the baselines, the ablations or the limitations unless the abstract names them. |
-| `metadata` | Nothing about the objective or the method. Give the title, authors, venue and DOI, say the text was not available, and offer the routes to it. |
+| `metadata` | Nothing about the objective or the method. Give the title, authors, venue and DOI, say the text was not available, and offer the routes to it.                                 |
 
 The third row is the one that matters. A paywalled article with no abstract is
 the normal case in many fields, and the pressure to fill the gap is exactly

@@ -176,8 +176,6 @@ function chunk(items, size) {
   return out;
 }
 
-
-
 const USAGE = `usage: suniv-zotero <command> [options]
 
   status                          report which Zotero paths are reachable
@@ -252,7 +250,8 @@ async function commandStatus() {
     web: {
       configured: Boolean(webKey() && userId()),
       capability: "read and write",
-      note: webKey() && userId() ? "Key present." : "Set ZOTERO_API_KEY and ZOTERO_USER_ID from zotero.org/settings/keys.",
+      note:
+        webKey() && userId() ? "Key present." : "Set ZOTERO_API_KEY and ZOTERO_USER_ID from zotero.org/settings/keys.",
     },
   });
 }
@@ -321,7 +320,10 @@ async function main() {
         return 0;
       case "collections": {
         const { via, data } = await readApi("/collections?limit=100");
-        print({ via, collections: (data || []).map((c) => ({ key: c.key ?? c.data?.key, name: c.data?.name ?? c.name })) });
+        print({
+          via,
+          collections: (data || []).map((c) => ({ key: c.key ?? c.data?.key, name: c.data?.name ?? c.name })),
+        });
         return 0;
       }
       case "search": {

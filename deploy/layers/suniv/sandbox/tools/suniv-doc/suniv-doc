@@ -83,7 +83,9 @@ function commandCheck() {
   for (const [binary, need] of Object.entries(REQUIREMENTS)) {
     report[binary] = { installed: have(binary), provides: need.provides, install: need.install };
   }
-  const missing = Object.entries(report).filter(([, r]) => !r.installed).map(([b]) => b);
+  const missing = Object.entries(report)
+    .filter(([, r]) => !r.installed)
+    .map(([b]) => b);
   process.stdout.write(
     `${JSON.stringify(
       {
@@ -145,7 +147,15 @@ function commandBib(options) {
     writeFileSync(inputPath, JSON.stringify(source.items));
   }
 
-  run("pandoc", [inputPath, "--from", from === "csljson" ? "csljson" : "biblatex", "--to", to === "csljson" ? "csljson" : "biblatex", "-o", options.output]);
+  run("pandoc", [
+    inputPath,
+    "--from",
+    from === "csljson" ? "csljson" : "biblatex",
+    "--to",
+    to === "csljson" ? "csljson" : "biblatex",
+    "-o",
+    options.output,
+  ]);
   process.stdout.write(`${JSON.stringify({ input: options.input, output: options.output }, null, 2)}\n`);
   return 0;
 }

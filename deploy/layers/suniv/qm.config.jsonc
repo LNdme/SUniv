@@ -52,7 +52,7 @@
   // within the set an operator approves on the Admin page.
   "env": {
     "core": { "HARNESS": "pi" },
-    "auth": { "AUTH_EMAIL_TRANSPORT": "resend" }
+    "auth": { "AUTH_EMAIL_TRANSPORT": "resend" },
   },
 
   // The Fly app agents execute in. The core boots the immutable sandbox image
@@ -67,6 +67,6 @@
   // the keychain and each tool's auth.credentialPaths instead.
   "sandbox": {
     "app": "suniv-sandboxes",
-    "env": { "SUNIV_CONTACT_EMAIL": "contact@suniv.example" }
-  }
+    "env": { "SUNIV_CONTACT_EMAIL": "contact@suniv.example" },
+  },
 }

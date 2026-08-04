@@ -4,14 +4,14 @@ Six tools and seven skills. The tools are plumbing; the skills are the product.
 
 ## Tools
 
-| Tool | What it reaches | Credentials |
-| --- | --- | --- |
-| `suniv-search` | OpenAlex, Crossref, arXiv, Semantic Scholar, Europe PMC, HAL, CORE, Unpaywall | none (CORE and Semantic Scholar take optional keys) |
-| `suniv-zotero` | the student's Zotero library | none to read locally; a web key to write |
-| `suniv-indexed` | Scopus, IEEE Xplore | the student's institutional keys |
-| `suniv-scholar` | Google Scholar, through SerpApi only | the student's SerpApi key |
-| `suniv-doc` | pandoc, latexmk | none |
-| `suniv-lib` | the student's own PDFs | none |
+| Tool            | What it reaches                                                               | Credentials                                         |
+| --------------- | ----------------------------------------------------------------------------- | --------------------------------------------------- |
+| `suniv-search`  | OpenAlex, Crossref, arXiv, Semantic Scholar, Europe PMC, HAL, CORE, Unpaywall | none (CORE and Semantic Scholar take optional keys) |
+| `suniv-zotero`  | the student's Zotero library                                                  | none to read locally; a web key to write            |
+| `suniv-indexed` | Scopus, IEEE Xplore                                                           | the student's institutional keys                    |
+| `suniv-scholar` | Google Scholar, through SerpApi only                                          | the student's SerpApi key                           |
+| `suniv-doc`     | pandoc, latexmk                                                               | none                                                |
+| `suniv-lib`     | the student's own PDFs                                                        | none                                                |
 
 Each tool is one self-contained executable. The layer build copies
 `tools/<id>/<binary>` and nothing beside it, so a tool that imported a sibling

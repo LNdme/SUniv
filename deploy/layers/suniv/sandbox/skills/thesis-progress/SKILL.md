@@ -51,7 +51,7 @@ suniv-search "<question terms>" --from <current year> --sort year --limit 15
 
 Report only what is genuinely new since last time and genuinely bears on the
 question — a digest that is mostly noise gets ignored within a month, and then
-the watch is worthless. For each item worth surfacing: why it matters to *this*
+the watch is worthless. For each item worth surfacing: why it matters to _this_
 dissertation. A paper that threatens the gap claim is urgent and should be said
 so; a paper that merely shares vocabulary is not.
 

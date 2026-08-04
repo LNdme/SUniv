@@ -42,7 +42,11 @@ function parsePublicationInfo(summary) {
       .split(",")
       .map((name) => splitName(name))
       .filter(Boolean),
-    venue: (venuePart || "").replace(/\b(1[89]\d{2}|20\d{2})\b/, "").replace(/[-,]\s*$/, "").trim() || undefined,
+    venue:
+      (venuePart || "")
+        .replace(/\b(1[89]\d{2}|20\d{2})\b/, "")
+        .replace(/[-,]\s*$/, "")
+        .trim() || undefined,
     year: year ? Number(year[1]) : undefined,
   };
 }
@@ -168,7 +172,9 @@ async function main() {
   try {
     body = await serpapi(options.query, options);
   } catch (err) {
-    process.stderr.write(`suniv-scholar: ${err.message}\nsuniv-search covers most of this literature and returns DOIs.\n`);
+    process.stderr.write(
+      `suniv-scholar: ${err.message}\nsuniv-search covers most of this literature and returns DOIs.\n`,
+    );
     return 1;
   }
 

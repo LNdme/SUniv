@@ -152,11 +152,16 @@ async function ieee(query, options) {
       type: article.content_type === "Conferences" ? "paper-conference" : "article-journal",
       title: article.title || "",
       author: (article.authors?.authors || []).map((a) => splitName(a.full_name)).filter(Boolean),
-      issued: issuedFromDate(article.publication_date) || (article.publication_year ? { "date-parts": [[Number(article.publication_year)]] } : undefined),
+      issued:
+        issuedFromDate(article.publication_date) ||
+        (article.publication_year ? { "date-parts": [[Number(article.publication_year)]] } : undefined),
       "container-title": article.publication_title || undefined,
       volume: article.volume || undefined,
       issue: article.issue || undefined,
-      page: article.start_page && article.end_page ? `${article.start_page}-${article.end_page}` : article.start_page || undefined,
+      page:
+        article.start_page && article.end_page
+          ? `${article.start_page}-${article.end_page}`
+          : article.start_page || undefined,
       DOI: article.doi || undefined,
       URL: article.html_url || (article.doi ? `https://doi.org/${article.doi}` : undefined),
       abstract: article.abstract || undefined,
@@ -266,7 +271,9 @@ async function main() {
     process.stdout.write(`${JSON.stringify(items, null, 2)}\n`);
     return 0;
   }
-  process.stdout.write(`${JSON.stringify({ query: options.query, count: items.length, items, unavailable }, null, 2)}\n`);
+  process.stdout.write(
+    `${JSON.stringify({ query: options.query, count: items.length, items, unavailable }, null, 2)}\n`,
+  );
   return 0;
 }
 
