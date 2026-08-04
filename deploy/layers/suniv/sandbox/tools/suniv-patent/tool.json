@@ -1,0 +1,21 @@
+{
+  "id": "suniv-patent",
+  "label": "Patent prior art",
+  "advertise": "suniv-patent",
+  "hints": [
+    "suniv-patent searches published patents and applications at the EPO and the USPTO. Reach for it whenever a team is building something they may want to protect, and alongside suniv-search whenever novelty is the question — an examiner weighs patents and papers together, so a prior-art picture built from literature alone is incomplete.",
+    "It returns bibliographic data only. A patent's scope is defined by its claims, which are not retrieved, so never conclude from an abstract that something is or is not covered. Say the claims still need reading.",
+    "Finding nothing is not proof that nothing exists. Patent applications publish about eighteen months after filing, so the most relevant prior art may simply not be public yet. Report the search as what it is — partial — and never let a team treat it as clearance.",
+    "This does not replace a search by a patent attorney, and nothing it returns is legal advice. Its job is to inform the conversation the team will have with their own counsel.",
+    "Output is CSL-JSON with type \"patent\", so results file into Zotero and cite through pandoc exactly like papers."
+  ],
+  "egress": ["ops.epo.org", "search.patentsview.org"],
+  "auth": {
+    "check": "suniv-patent --status",
+    "reauth": "EPO: register free OPS credentials at developers.epo.org and set EPO_OPS_KEY and EPO_OPS_SECRET. USPTO: request a free key at patentsview.org/apis/keyrequest and set PATENTSVIEW_API_KEY.",
+    "credentialPaths": [{ "path": ".config/suniv/patent.env", "kind": "file" }]
+  },
+  "install": {
+    "binary": "suniv-patent"
+  }
+}

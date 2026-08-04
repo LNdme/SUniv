@@ -5,8 +5,9 @@
   "hints": [
     "suniv-zotero is the student's reference library. File works there as soon as they are worth keeping — a search result that is never filed is lost the moment the conversation ends.",
     "Pipe suniv-search --csl into a file and pass it to `suniv-zotero add --file`; the CSL-JSON converts to Zotero's schema, and the grounding level travels with the item so a later draft still knows what was actually read.",
-    "Reads prefer a Zotero running on the same machine and need no key. Writes always need ZOTERO_API_KEY and ZOTERO_USER_ID, because Zotero's local API is read-only by design — say so plainly rather than reporting a failed write.",
-    "Run `suniv-zotero status` before concluding that Zotero is unavailable; it names which of the two paths is reachable."
+    "Reads prefer a Zotero running on the same machine and need no key. Writes always need ZOTERO_API_KEY plus ZOTERO_USER_ID or ZOTERO_GROUP_ID, because Zotero's local API is read-only by design — say so plainly rather than reporting a failed write.",
+    "A research team shares one group library: with ZOTERO_GROUP_ID set, or --group passed, everything filed is immediately there for every member, so one person's literature scan becomes the team's. Prefer the group library over the personal one whenever the work belongs to a project rather than to an individual.",
+    "Run `suniv-zotero status` before concluding that Zotero is unavailable; it names the library in use and which of the two paths is reachable."
   ],
   "egress": ["api.zotero.org"],
   "auth": {

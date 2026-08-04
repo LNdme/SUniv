@@ -1,0 +1,390 @@
+#!/usr/bin/env node
+const USAGE = `usage: suniv-patent <query> [options]
+
+  --source epo|uspto|all   which office to search (default all)
+  --limit N                results per office (default 20)
+  --from YEAR / --to YEAR  publication year bounds
+  --status                 report which credentials are present
+  --csl                    bare CSL-JSON array, ready for Zotero or pandoc
+
+Patents are prior art, and prior art is what decides whether an invention can
+still be protected. This searches published applications and grants; it does
+not replace a search by a patent attorney, and an absence of results here is
+not an absence of prior art.
+
+What comes back is bibliographic: title, abstract, inventors, assignee. The
+claims — which are what actually define a patent's scope — are not retrieved,
+so never judge whether something is covered from an abstract alone.`;
+
+const EPO_KEY = "EPO_OPS_KEY";
+const EPO_SECRET = "EPO_OPS_SECRET";
+const USPTO_KEY = "PATENTSVIEW_API_KEY";
+
+class PatentError extends Error {
+  constructor(source, message, remedy) {
+    super(message);
+    this.source = source;
+    this.remedy = remedy;
+  }
+}
+
+function asArray(value) {
+  if (value === undefined || value === null) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function textOf(value) {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    if (typeof value.$ === "string") return value.$;
+    if (typeof value["#text"] === "string") return value["#text"];
+  }
+  return "";
+}
+
+function splitName(display) {
+  const clean = String(display || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!clean) return null;
+  if (clean.includes(",")) {
+    const [family, given] = clean.split(",", 2);
+    return { family: family.trim(), given: (given || "").trim() };
+  }
+  const parts = clean.split(" ");
+  if (parts.length === 1) return { family: parts[0] };
+  return { family: parts.at(-1), given: parts.slice(0, -1).join(" ") };
+}
+
+function issuedFromCompact(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (digits.length < 4) return undefined;
+  const parts = [Number(digits.slice(0, 4))];
+  if (digits.length >= 6) parts.push(Number(digits.slice(4, 6)));
+  if (digits.length >= 8) parts.push(Number(digits.slice(6, 8)));
+  return { "date-parts": [parts] };
+}
+
+function yearOf(item) {
+  return item?.issued?.["date-parts"]?.[0]?.[0];
+}
+
+function ground(item) {
+  item.custom = item.custom || {};
+  const meta = (item.custom.suniv = item.custom.suniv || {});
+  meta.claimsRetrieved = false;
+  if (item.abstract && item.abstract.length >= 40) {
+    meta.grounding = "abstract";
+    meta.groundingNote =
+      "Abstract only. A patent's scope lives in its claims, which were not retrieved — report what the abstract describes, and say the claims still need reading before any conclusion about coverage.";
+  } else {
+    meta.grounding = "metadata";
+    meta.groundingNote =
+      "Metadata only: no abstract came back. Give the publication number and let the reader open it; do not characterise what the patent covers.";
+  }
+  return item;
+}
+
+function citekeyFor(item, index) {
+  const family = String(item.author?.[0]?.family || "anon")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[^a-z]/g, "");
+  const number = String(item.number || `n${index}`)
+    .replace(/[^A-Za-z0-9]/g, "")
+    .toLowerCase();
+  return `${family || "anon"}${yearOf(item) ?? "nd"}${number}`;
+}
+
+async function json(source, url, options = {}) {
+  const control = new AbortController();
+  const timer = setTimeout(() => control.abort(), 30000);
+  let response;
+  try {
+    response = await fetch(url, { ...options, signal: control.signal });
+  } catch (err) {
+    throw new PatentError(
+      source,
+      err.name === "AbortError" ? "timed out" : err.message,
+      "Check that this sandbox is allowed to reach the office's API host.",
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const text = await response.text();
+  if (response.status === 401 || response.status === 403) {
+    throw new PatentError(
+      source,
+      `HTTP ${response.status} — the credentials were rejected`,
+      source === "epo"
+        ? "Register a free OPS account at developers.epo.org and set EPO_OPS_KEY and EPO_OPS_SECRET."
+        : "Request a free key at patentsview.org/apis/keyrequest and set PATENTSVIEW_API_KEY.",
+    );
+  }
+  if (response.status === 429) throw new PatentError(source, "HTTP 429 — the quota for these credentials is spent");
+  if (!response.ok) throw new PatentError(source, `HTTP ${response.status} ${response.statusText}`.trim());
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new PatentError(source, "response was not JSON");
+  }
+}
+
+async function epoToken() {
+  const key = process.env[EPO_KEY];
+  const secret = process.env[EPO_SECRET];
+  if (!key || !secret) {
+    throw new PatentError(
+      "epo",
+      `${EPO_KEY} and ${EPO_SECRET} are not set`,
+      "Register a free OPS account at developers.epo.org.",
+    );
+  }
+  const body = await json("epo", "https://ops.epo.org/3.2/auth/accesstoken", {
+    method: "POST",
+    headers: {
+      authorization: `Basic ${Buffer.from(`${key}:${secret}`).toString("base64")}`,
+      "content-type": "application/x-www-form-urlencoded",
+      accept: "application/json",
+    },
+    body: "grant_type=client_credentials",
+  });
+  if (!body.access_token) throw new PatentError("epo", "the token response carried no access_token");
+  return body.access_token;
+}
+
+function epoDocuments(body) {
+  const results = body?.["ops:world-patent-data"]?.["ops:biblio-search"]?.["ops:search-result"];
+  return asArray(results?.["exchange-documents"]).flatMap((entry) => asArray(entry["exchange-document"]));
+}
+
+function epoItem(document) {
+  const biblio = document["bibliographic-data"] || {};
+  const titles = asArray(biblio["invention-title"]);
+  const english = titles.find((t) => t["@lang"] === "en") || titles[0];
+  const publication = asArray(biblio["publication-reference"]?.["document-id"]).find(
+    (d) => d["@document-id-type"] === "docdb" || d["@document-id-type"] === "epodoc",
+  );
+  const country = textOf(publication?.country) || document["@country"] || "";
+  const number = textOf(publication?.["doc-number"]) || document["@doc-number"] || "";
+  const kind = textOf(publication?.kind) || document["@kind"] || "";
+  const inventors = asArray(biblio.parties?.inventors?.inventor)
+    .filter((i) => i["@data-format"] !== "original")
+    .map((i) => splitName(textOf(i["inventor-name"]?.name)))
+    .filter(Boolean);
+  const applicants = asArray(biblio.parties?.applicants?.applicant)
+    .filter((a) => a["@data-format"] !== "original")
+    .map((a) => textOf(a["applicant-name"]?.name))
+    .filter(Boolean);
+
+  return ground({
+    type: "patent",
+    title: textOf(english?.$ ?? english) || "",
+    author: inventors,
+    issued: issuedFromCompact(textOf(publication?.date)),
+    number: `${country}${number}${kind}`,
+    authority: country,
+    URL: country && number ? `https://worldwide.espacenet.com/patent/search?q=pn%3D${country}${number}` : undefined,
+    abstract: asArray(document.abstract)
+      .map((a) =>
+        asArray(a.p)
+          .map((p) => textOf(p))
+          .join(" "),
+      )
+      .join(" ")
+      .trim(),
+    custom: { suniv: { sources: ["epo"], assignee: applicants[0], office: "EPO OPS" } },
+  });
+}
+
+async function epo(query, options) {
+  const token = await epoToken();
+  const terms = [`ti,ab="${query.replace(/"/g, "")}"`];
+  if (options.from) terms.push(`pd within "${options.from} ${options.to || new Date().getFullYear()}"`);
+  const url = new URL("https://ops.epo.org/3.2/rest-services/published-data/search/biblio");
+  url.searchParams.set("q", terms.join(" and "));
+  url.searchParams.set("Range", `1-${Math.min(options.limit, 25)}`);
+
+  const body = await json("epo", url.toString(), {
+    headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+  });
+  return epoDocuments(body).map(epoItem);
+}
+
+async function uspto(query, options) {
+  const key = process.env[USPTO_KEY];
+  if (!key) {
+    throw new PatentError("uspto", `${USPTO_KEY} is not set`, "Request a free key at patentsview.org/apis/keyrequest.");
+  }
+
+  const conditions = [{ _text_any: { patent_title: query } }];
+  if (options.from) conditions.push({ _gte: { patent_date: `${options.from}-01-01` } });
+  if (options.to) conditions.push({ _lte: { patent_date: `${options.to}-12-31` } });
+
+  const url = new URL("https://search.patentsview.org/api/v1/patent/");
+  url.searchParams.set("q", JSON.stringify(conditions.length > 1 ? { _and: conditions } : conditions[0]));
+  url.searchParams.set(
+    "f",
+    JSON.stringify([
+      "patent_id",
+      "patent_title",
+      "patent_date",
+      "patent_abstract",
+      "inventors.inventor_name_first",
+      "inventors.inventor_name_last",
+      "assignees.assignee_organization",
+    ]),
+  );
+  url.searchParams.set("o", JSON.stringify({ size: Math.min(options.limit, 100) }));
+
+  const body = await json("uspto", url.toString(), { headers: { "X-Api-Key": key, accept: "application/json" } });
+  return asArray(body.patents).map((patent) =>
+    ground({
+      type: "patent",
+      title: patent.patent_title || "",
+      author: asArray(patent.inventors)
+        .map((i) =>
+          i.inventor_name_last ? { family: i.inventor_name_last, given: i.inventor_name_first || undefined } : null,
+        )
+        .filter(Boolean),
+      issued: issuedFromCompact(String(patent.patent_date || "").replace(/-/g, "")),
+      number: `US${patent.patent_id}`,
+      authority: "US",
+      URL: `https://patents.google.com/patent/US${patent.patent_id}`,
+      abstract: patent.patent_abstract || "",
+      custom: {
+        suniv: {
+          sources: ["uspto"],
+          assignee: asArray(patent.assignees)[0]?.assignee_organization,
+          office: "USPTO PatentsView",
+        },
+      },
+    }),
+  );
+}
+
+function parseArgs(argv) {
+  const options = { limit: 20, source: "all", _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const next = () => argv[++i];
+    switch (arg) {
+      case "-h":
+      case "--help":
+        return { help: true };
+      case "--status":
+        options.status = true;
+        break;
+      case "--source":
+        options.source = next();
+        break;
+      case "--limit":
+        options.limit = Number.parseInt(next(), 10);
+        break;
+      case "--from":
+        options.from = Number.parseInt(next(), 10);
+        break;
+      case "--to":
+        options.to = Number.parseInt(next(), 10);
+        break;
+      case "--csl":
+        options.csl = true;
+        break;
+      default:
+        if (arg.startsWith("--")) return { error: `unknown option ${arg}` };
+        options._.push(arg);
+    }
+  }
+  options.query = options._.join(" ").trim();
+  if (!["all", "epo", "uspto"].includes(options.source)) return { error: "--source must be epo, uspto or all" };
+  if (!Number.isFinite(options.limit) || options.limit < 1) return { error: "--limit must be a positive integer" };
+  return { options };
+}
+
+function status() {
+  return {
+    epo: {
+      credentials: Boolean(process.env[EPO_KEY] && process.env[EPO_SECRET]),
+      covers: "EP, WO and national collections via INPADOC",
+    },
+    uspto: { credentials: Boolean(process.env[USPTO_KEY]), covers: "granted US patents" },
+    limits: [
+      "Bibliographic data only: claims are not retrieved, and claims are what define scope.",
+      "A search here does not replace one by a patent attorney, and finding nothing is not proof that nothing exists.",
+    ],
+  };
+}
+
+async function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.help) {
+    process.stdout.write(`${USAGE}\n`);
+    return 0;
+  }
+  if (parsed.error) {
+    process.stderr.write(`suniv-patent: ${parsed.error}\n\n${USAGE}\n`);
+    return 2;
+  }
+
+  const { options } = parsed;
+  if (options.status) {
+    process.stdout.write(`${JSON.stringify(status(), null, 2)}\n`);
+    return 0;
+  }
+  if (!options.query) {
+    process.stderr.write(`suniv-patent: a query is required\n\n${USAGE}\n`);
+    return 2;
+  }
+
+  const wanted = options.source === "all" ? ["epo", "uspto"] : [options.source];
+  const runners = { epo, uspto };
+  const settled = await Promise.allSettled(wanted.map((name) => runners[name](options.query, options)));
+
+  const items = [];
+  const unavailable = [];
+  for (const [index, outcome] of settled.entries()) {
+    if (outcome.status === "fulfilled") items.push(...outcome.value);
+    else {
+      unavailable.push({
+        source: wanted[index],
+        reason: outcome.reason?.message || String(outcome.reason),
+        remedy: outcome.reason?.remedy,
+      });
+    }
+  }
+
+  if (!items.length && unavailable.length === wanted.length) {
+    process.stderr.write(
+      `suniv-patent: no patent office answered, so this is not an empty result — it is no result at all.\n${unavailable
+        .map((u) => `  ${u.source}: ${u.reason}${u.remedy ? `\n    ${u.remedy}` : ""}`)
+        .join("\n")}\n`,
+    );
+    return 1;
+  }
+
+  items.forEach((item, index) => {
+    item.id = citekeyFor(item, index);
+  });
+
+  if (options.csl) {
+    process.stdout.write(`${JSON.stringify(items, null, 2)}\n`);
+    return 0;
+  }
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        query: options.query,
+        count: items.length,
+        items,
+        unavailable,
+        note: "Claims were not retrieved. Read them before concluding that anything is or is not covered.",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  return 0;
+}
+
+process.exitCode = await main();

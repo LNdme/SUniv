@@ -10,6 +10,7 @@ Six tools and seven skills. The tools are plumbing; the skills are the product.
 | `suniv-zotero`  | the student's Zotero library                                                  | none to read locally; a web key to write            |
 | `suniv-indexed` | Scopus, IEEE Xplore                                                           | the student's institutional keys                    |
 | `suniv-scholar` | Google Scholar, through SerpApi only                                          | the student's SerpApi key                           |
+| `suniv-patent`  | EPO OPS, USPTO PatentsView                                                    | free credentials from each office                   |
 | `suniv-doc`     | pandoc, latexmk                                                               | none                                                |
 | `suniv-lib`     | the student's own PDFs                                                        | none                                                |
 
@@ -62,3 +63,23 @@ did not return, and no description of a method beyond what was actually read.
 comparing and understanding; `brainstorm-topic`, `outline-and-draft` and
 `thesis-progress` cover choosing a question, writing it up, and holding the
 state of a year-long piece of work.
+
+Five more serve a team rather than an individual. `disclosure-guard` is the one
+that prevents an irreversible loss: publishing before filing destroys patent
+rights in Europe and China outright, and a preprint counts as publishing.
+`prior-art-scan` searches patents and papers together, because an examiner
+weighs them together. `lab-notebook` keeps the project's shared record — the
+same entries serve teammates, the paper, and a patent filing. `team-digest`
+reports what moved and what is stuck. `explain-the-brick` explains one member's
+component to another, which is what makes the collaboration educational rather
+than merely parallel.
+
+## Team libraries
+
+`suniv-zotero --group <id>`, or `ZOTERO_GROUP_ID`, points every read and write
+at a shared Zotero group library instead of a personal one, so one member's
+literature scan becomes the team's.
+
+Set that id in the **project's own scope**, not in `sandbox.env`. A
+deployment-wide value forces every project on the instance into one library,
+which suits a single startup and breaks an institution hosting twenty teams.

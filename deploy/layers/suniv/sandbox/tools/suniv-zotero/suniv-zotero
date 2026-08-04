@@ -37,13 +37,32 @@ function userId() {
   return process.env.ZOTERO_USER_ID || "";
 }
 
+let selectedGroup = "";
+
+function groupId() {
+  return selectedGroup || process.env.ZOTERO_GROUP_ID || "";
+}
+
+function library() {
+  const group = groupId();
+  if (group) return { kind: "group", id: group, webPath: `/groups/${group}`, localPath: `/groups/${group}` };
+  return { kind: "personal", id: userId(), webPath: `/users/${userId()}`, localPath: "/users/0" };
+}
+
+function webConfigured() {
+  return Boolean(webKey() && (groupId() || userId()));
+}
+
 function describeAuth() {
   const lines = ["suniv-zotero: no Zotero access is configured. Two paths exist, and they do different things:"];
   lines.push(
     "  local  — Zotero 7 running on this machine with 'Allow other applications on this computer to communicate with Zotero' enabled. Reads the library with no key, and cannot write.",
   );
   lines.push(
-    "  web    — ZOTERO_API_KEY and ZOTERO_USER_ID from zotero.org/settings/keys. Reads and writes, and is the only way to file items into collections.",
+    "  web    — ZOTERO_API_KEY plus ZOTERO_USER_ID (personal) or ZOTERO_GROUP_ID (a team library), from zotero.org/settings/keys. Reads and writes, and is the only way to file items into collections.",
+  );
+  lines.push(
+    "A team shares one group library: set ZOTERO_GROUP_ID in the project's own scope, never deployment-wide, or every project on this instance writes into the same library.",
   );
   return lines.join("\n");
 }
@@ -79,7 +98,7 @@ async function request(url, { method = "GET", headers = {}, body } = {}) {
 
 async function localAvailable() {
   try {
-    await request(`${localBase()}/users/0/collections?limit=1`);
+    await request(`${localBase()}${library().localPath}/collections?limit=1`);
     return true;
   } catch {
     return false;
@@ -87,25 +106,43 @@ async function localAvailable() {
 }
 
 async function readApi(path, { preferLocal = true } = {}) {
+  const target = library();
   if (preferLocal && (await localAvailable())) {
-    return { via: "local", data: await request(`${localBase()}/users/0${path}`) };
+    return { via: "local", library: target.kind, data: await request(`${localBase()}${target.localPath}${path}`) };
   }
-  if (!webKey() || !userId()) throw new ZoteroError(describeAuth());
-  return {
-    via: "web",
-    data: await request(`https://api.zotero.org/users/${userId()}${path}`, {
-      headers: { "Zotero-API-Key": webKey(), "Zotero-API-Version": "3" },
-    }),
-  };
+  if (!webConfigured() && target.kind !== "group") throw new ZoteroError(describeAuth());
+  const headers = { "Zotero-API-Version": "3" };
+  if (webKey()) headers["Zotero-API-Key"] = webKey();
+  try {
+    return {
+      via: "web",
+      library: target.kind,
+      data: await request(`https://api.zotero.org${target.webPath}${path}`, { headers }),
+    };
+  } catch (err) {
+    if (target.kind === "group" && /HTTP 404/.test(err.message)) {
+      throw new ZoteroError(
+        `Zotero has no group ${target.id}. The group id is the number in the library's zotero.org URL, not the group's name — check it before assuming the library is empty.`,
+      );
+    }
+    if (target.kind === "group" && /HTTP 40[13]/.test(err.message)) {
+      throw new ZoteroError(
+        webKey()
+          ? `The key is not a member of Zotero group ${target.id}, or lacks access to it. Group membership is granted in the group's settings on zotero.org, separately from the key itself.`
+          : `Zotero group ${target.id} is not public, so reading it needs a key.\n\n${describeAuth()}`,
+      );
+    }
+    throw err;
+  }
 }
 
 async function writeApi(path, payload, method = "POST") {
-  if (!webKey() || !userId()) {
+  if (!webConfigured()) {
     throw new ZoteroError(
       `${describeAuth()}\n\nWriting needs the web path: Zotero's local API is read-only by design, so a key is required to create items, collections or tags.`,
     );
   }
-  return await request(`https://api.zotero.org/users/${userId()}${path}`, {
+  return await request(`https://api.zotero.org${library().webPath}${path}`, {
     method,
     headers: {
       "Zotero-API-Key": webKey(),
@@ -187,8 +224,15 @@ const USAGE = `usage: suniv-zotero <command> [options]
        [--tag TAG]                repeatable
   tag --item KEY --tag TAG        add tags to an existing item
 
+  --group ID                      work in a team's group library instead of the
+                                  personal one (or set ZOTERO_GROUP_ID)
+
 Reads prefer Zotero running locally (no key, works offline). Writes always go
-through the web API, because Zotero's local API is read-only by design.`;
+through the web API, because Zotero's local API is read-only by design.
+
+A research team shares one group library, so a paper filed by one member is
+there for everyone. Set ZOTERO_GROUP_ID in the project's own scope rather than
+deployment-wide, or every project on the instance writes into the same library.`;
 
 function parseArgs(argv) {
   const options = { tags: [], _: [] };
@@ -210,6 +254,9 @@ function parseArgs(argv) {
         break;
       case "--item":
         options.item = next();
+        break;
+      case "--group":
+        options.group = next();
         break;
       default:
         if (arg.startsWith("--")) return { error: `unknown option ${arg}` };
@@ -238,7 +285,16 @@ async function findCollectionKey(name) {
 
 async function commandStatus() {
   const local = await localAvailable();
+  const target = library();
   print({
+    library: {
+      kind: target.kind,
+      id: target.id || null,
+      note:
+        target.kind === "group"
+          ? "Working in a team library: everything filed here is visible to every group member."
+          : "Working in the personal library. Set ZOTERO_GROUP_ID, or pass --group, to share the bibliography with a team.",
+    },
     local: {
       reachable: local,
       base: process.env.ZOTERO_LOCAL_API || "http://localhost:23119/api",
@@ -248,10 +304,11 @@ async function commandStatus() {
         : "No local Zotero. That is expected in a hosted sandbox — it needs Zotero 7 on the same machine with the local API enabled.",
     },
     web: {
-      configured: Boolean(webKey() && userId()),
+      configured: webConfigured(),
       capability: "read and write",
-      note:
-        webKey() && userId() ? "Key present." : "Set ZOTERO_API_KEY and ZOTERO_USER_ID from zotero.org/settings/keys.",
+      note: webConfigured()
+        ? "Key present."
+        : "Set ZOTERO_API_KEY plus ZOTERO_USER_ID or ZOTERO_GROUP_ID, from zotero.org/settings/keys.",
     },
   });
 }
@@ -270,8 +327,15 @@ async function commandAdd(options) {
     collectionInfo = { name: options.collection, key: resolved.key, created: resolved.created };
   }
 
+  const target = library();
   const payload = works.map((work) => cslToZotero(work, { collections, tags: options.tags }));
-  const report = { collection: collectionInfo, submitted: payload.length, created: [], failed: [] };
+  const report = {
+    library: { kind: target.kind, id: target.id || null },
+    collection: collectionInfo,
+    submitted: payload.length,
+    created: [],
+    failed: [],
+  };
 
   for (const batch of chunk(payload, 50)) {
     const result = await writeApi("/items", batch);
@@ -310,6 +374,7 @@ async function main() {
   }
 
   const { options } = parsed;
+  if (options.group) selectedGroup = options.group;
   const [command, ...rest] = options._;
 
   try {
@@ -319,9 +384,10 @@ async function main() {
         await commandStatus();
         return 0;
       case "collections": {
-        const { via, data } = await readApi("/collections?limit=100");
+        const { via, library: kind, data } = await readApi("/collections?limit=100");
         print({
           via,
+          library: kind,
           collections: (data || []).map((c) => ({ key: c.key ?? c.data?.key, name: c.data?.name ?? c.name })),
         });
         return 0;
@@ -329,14 +395,14 @@ async function main() {
       case "search": {
         const terms = rest.join(" ");
         if (!terms) throw new ZoteroError("search needs terms");
-        const { via, data } = await readApi(`/items?q=${encodeURIComponent(terms)}&limit=50`);
-        print({ via, count: (data || []).length, items: data });
+        const { via, library: kind, data } = await readApi(`/items?q=${encodeURIComponent(terms)}&limit=50`);
+        print({ via, library: kind, count: (data || []).length, items: data });
         return 0;
       }
       case "items": {
         const path = options.collection ? `/collections/${options.collection}/items?limit=100` : "/items?limit=100";
-        const { via, data } = await readApi(path);
-        print({ via, count: (data || []).length, items: data });
+        const { via, library: kind, data } = await readApi(path);
+        print({ via, library: kind, count: (data || []).length, items: data });
         return 0;
       }
       case "add":
