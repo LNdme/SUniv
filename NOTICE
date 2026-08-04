@@ -1,0 +1,10 @@
+SUniv
+Copyright (c) 2026 SUniv contributors
+
+This product includes software developed as QM (https://github.com/yc-software/qm),
+Copyright (c) YC Software, licensed under the MIT License.
+
+SUniv is a downstream distribution of QM. Everything outside deploy/layers/suniv/ is
+QM's work, carried here under the MIT License reproduced in LICENSE. The academic
+research and writing layer under deploy/layers/suniv/ is SUniv's own work, offered
+under the same license.
