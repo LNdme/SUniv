@@ -18,40 +18,36 @@ Each tool is one self-contained executable. The layer build copies
 `tools/<id>/<binary>` and nothing beside it, so a tool that imported a sibling
 module would lose it in the sandbox image.
 
-## Document export needs three binaries
+## The Dockerfile, and the base it stacks on
 
-`suniv-doc` and `suniv-lib` shell out to `pandoc`, `latexmk` and `pdftotext`.
-The QM sandbox base image carries none of them, so without this step the
-research half of SUniv works and the writing half reports missing binaries.
+`suniv-doc` and `suniv-lib` shell out to `pandoc`, `latexmk` and `pdftotext`,
+and the QM sandbox base carries none of them. Without the image, the research
+half of SUniv works and the writing half reports missing binaries;
 `suniv-doc check` says which are absent.
 
-Add them with a `Dockerfile` in this directory:
+`Dockerfile` here installs them and copies the seven binaries. **It has never
+been built** — it was written where Docker was unavailable, so the only thing
+verified is that `qm check` accepts it.
 
-```dockerfile
-FROM <the base image this deployment pins>
+Its `FROM` is `qm-sandbox-base:dev`, which is what `scripts/local-sandbox-build.sh`
+tags when it builds `fly/Dockerfile`. So the base must exist before the layer
+can stack on it:
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      pandoc poppler-utils \
-      latexmk texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended \
-  && rm -rf /var/lib/apt/lists/*
-
-COPY tools/suniv-doc/suniv-doc /usr/local/bin/suniv-doc
-COPY tools/suniv-indexed/suniv-indexed /usr/local/bin/suniv-indexed
-COPY tools/suniv-lib/suniv-lib /usr/local/bin/suniv-lib
-COPY tools/suniv-scholar/suniv-scholar /usr/local/bin/suniv-scholar
-COPY tools/suniv-search/suniv-search /usr/local/bin/suniv-search
-COPY tools/suniv-zotero/suniv-zotero /usr/local/bin/suniv-zotero
-RUN chmod -R a+rx /usr/local/bin
+```bash
+npm run sandbox:local:build     # from the repository root, builds qm-sandbox-base:dev
+npm exec qm -- sandbox publish  # from this deployment directory
 ```
 
-The `FROM` is left blank deliberately: it must name the sandbox base this
-deployment actually pins, which differs per operator and is not knowable here.
-Set `sandbox.baseImage` in `qm.config.jsonc` to the digest-pinned base and give
-`FROM` that same repository without the digest — the CLI then substitutes the
-pin at build time. Get it wrong and `qm sandbox publish` builds on the wrong
-base, which is why this is a documented step rather than a guessed default.
+Skipping the first command fails on a missing image rather than on anything
+that names the real cause.
 
-The TeX packages are the bulk of the image. Drop the `latexmk`/`texlive` line
+A deployment running published images rather than this source checkout pins its
+own base: set `sandbox.baseImage` in `qm.config.jsonc` to the digest-pinned
+reference and change `FROM` to that same repository without the digest. The CLI
+then substitutes the pin at build time. A layer Dockerfile always sets its own
+base, so `sandbox publish --from` is ignored once this file exists.
+
+The TeX packages are the bulk of the image. Drop the `latexmk`/`texlive` lines
 if the deployment only needs Word and Markdown output; `suniv-doc` will say PDF
 export is unavailable rather than failing obscurely.
 

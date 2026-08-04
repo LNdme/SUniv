@@ -28,6 +28,21 @@ function splitName(display) {
   return { family: parts.at(-1), given: parts.slice(0, -1).join(" ") };
 }
 
+function splitScopusName(display) {
+  const clean = String(display || "").trim();
+  if (!clean) return null;
+  if (clean.includes(",")) {
+    const [family, given] = clean.split(",", 2);
+    return { family: family.trim(), given: (given || "").trim() || undefined };
+  }
+  const parts = clean.split(/\s+/);
+  const initials = parts.at(-1);
+  if (parts.length > 1 && /^(?:[A-Z]\.?){1,4}$/.test(initials)) {
+    return { family: parts.slice(0, -1).join(" "), given: initials };
+  }
+  return splitName(clean);
+}
+
 function issuedFromDate(value) {
   const match = /^(\d{4})(?:-(\d{2}))?(?:-(\d{2}))?/.exec(String(value || ""));
   if (!match) return undefined;
@@ -114,7 +129,7 @@ async function scopus(query, options) {
         id: `scopus:${entry["dc:identifier"] || entry["eid"]}`,
         type: "article-journal",
         title: entry["dc:title"] || "",
-        author: [splitName(entry["dc:creator"])].filter(Boolean),
+        author: [splitScopusName(entry["dc:creator"])].filter(Boolean),
         issued: issuedFromDate(entry["prism:coverDate"]),
         "container-title": entry["prism:publicationName"] || undefined,
         volume: entry["prism:volume"] || undefined,
