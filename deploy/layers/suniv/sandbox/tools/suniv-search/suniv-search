@@ -1,0 +1,197 @@
+#!/usr/bin/env node
+import { DEFAULT_SOURCES, SOURCES, unpaywall } from "./lib/sources.mjs";
+import { dedupe, GROUNDING, hasOpenAccessLink, normalizeDoi, resolveGrounding, yearOf } from "./lib/csl.mjs";
+import { contactEmail } from "./lib/http.mjs";
+
+const USAGE = `usage: suniv-search <query> [options]
+
+  --limit N          results to return (default 20)
+  --from YEAR        earliest publication year
+  --to YEAR          latest publication year
+  --sources a,b      ${Object.keys(SOURCES).join(", ")} (default ${DEFAULT_SOURCES.join(", ")})
+  --sort relevance|citations|year
+  --open-access      only works with a reachable open-access copy
+  --no-fulltext      skip the Unpaywall pass that locates legal open-access copies
+  --csl              print a bare CSL-JSON array, ready for pandoc or Zotero import
+  --doi DOI          resolve one work by DOI instead of searching
+
+Every result carries custom.suniv.grounding, which states what SUniv actually
+has of the work: "${GROUNDING.fulltext}", "${GROUNDING.abstract}", or "${GROUNDING.metadata}".
+A ${GROUNDING.metadata} result must never have its objective or method described.`;
+
+function parseArgs(argv) {
+  const options = {
+    limit: 20,
+    sources: DEFAULT_SOURCES,
+    sort: "relevance",
+    fulltext: true,
+    csl: false,
+    openAccess: false,
+  };
+  const terms = [];
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const next = () => argv[++i];
+    switch (arg) {
+      case "-h":
+      case "--help":
+        return { help: true };
+      case "--limit":
+        options.limit = Number.parseInt(next(), 10);
+        break;
+      case "--from":
+        options.from = Number.parseInt(next(), 10);
+        break;
+      case "--to":
+        options.to = Number.parseInt(next(), 10);
+        break;
+      case "--sources":
+        options.sources = next()
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        break;
+      case "--sort":
+        options.sort = next();
+        break;
+      case "--open-access":
+        options.openAccess = true;
+        break;
+      case "--no-fulltext":
+        options.fulltext = false;
+        break;
+      case "--csl":
+        options.csl = true;
+        break;
+      case "--doi":
+        options.doi = normalizeDoi(next());
+        break;
+      default:
+        if (arg.startsWith("--")) return { error: `unknown option ${arg}` };
+        terms.push(arg);
+    }
+  }
+
+  options.query = terms.join(" ").trim();
+  if (!Number.isFinite(options.limit) || options.limit < 1) return { error: "--limit must be a positive integer" };
+  const unknown = options.sources.filter((s) => !SOURCES[s]);
+  if (unknown.length) return { error: `unknown source(s): ${unknown.join(", ")}` };
+  if (!options.query && !options.doi) return { error: "a query or --doi is required" };
+  return { options };
+}
+
+async function gather(options) {
+  const diagnostics = { queried: [], skipped: [], failed: [] };
+  const settled = await Promise.allSettled(
+    options.sources.map(async (name) => ({ name, items: await SOURCES[name](options.query, options) })),
+  );
+
+  const collected = [];
+  for (const [index, outcome] of settled.entries()) {
+    const name = options.sources[index];
+    if (outcome.status === "fulfilled") {
+      diagnostics.queried.push({ source: name, returned: outcome.value.items.length });
+      collected.push(...outcome.value.items);
+      continue;
+    }
+    const reason = outcome.reason?.message || String(outcome.reason);
+    if (reason.includes("is not set")) diagnostics.skipped.push({ source: name, reason });
+    else diagnostics.failed.push({ source: name, reason });
+  }
+  return { collected, diagnostics };
+}
+
+async function byDoi(doi) {
+  const { collected, diagnostics } = await gather({
+    query: doi,
+    sources: ["crossref", "openalex"],
+    limit: 5,
+    sort: "relevance",
+  });
+  const match = collected.find((item) => normalizeDoi(item.DOI) === doi);
+  return { collected: match ? [match] : [], diagnostics };
+}
+
+async function addOpenAccessLinks(items) {
+  const targets = items.filter(
+    (item) => item.DOI && !item.custom?.suniv?.pdfUrl && !item.custom?.suniv?.openAccessUrl,
+  );
+  const resolved = await Promise.allSettled(targets.map((item) => unpaywall(normalizeDoi(item.DOI))));
+  resolved.forEach((outcome, index) => {
+    if (outcome.status !== "fulfilled" || !outcome.value) return;
+    Object.assign(targets[index].custom.suniv, outcome.value);
+  });
+}
+
+function sortItems(items, sort) {
+  if (sort === "citations") {
+    return [...items].sort((a, b) => (b.custom?.suniv?.citedBy ?? 0) - (a.custom?.suniv?.citedBy ?? 0));
+  }
+  if (sort === "year") {
+    return [...items].sort((a, b) => (yearOf(b) ?? 0) - (yearOf(a) ?? 0));
+  }
+  return items;
+}
+
+async function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.help) {
+    process.stdout.write(`${USAGE}\n`);
+    return 0;
+  }
+  if (parsed.error) {
+    process.stderr.write(`suniv-search: ${parsed.error}\n\n${USAGE}\n`);
+    return 2;
+  }
+
+  const { options } = parsed;
+  const { collected, diagnostics } = options.doi ? await byDoi(options.doi) : await gather(options);
+
+  if (!collected.length && diagnostics.failed.length && !diagnostics.queried.length) {
+    process.stderr.write(
+      `suniv-search: every source failed, so this is an outage, not an empty result.\n${diagnostics.failed
+        .map((f) => `  ${f.source}: ${f.reason}`)
+        .join("\n")}\n`,
+    );
+    return 1;
+  }
+
+  let items = dedupe(collected);
+  if (options.fulltext) await addOpenAccessLinks(items);
+  items.forEach(resolveGrounding);
+  if (options.openAccess) items = items.filter(hasOpenAccessLink);
+  items = sortItems(items, options.sort).slice(0, options.limit);
+
+  if (options.csl) {
+    process.stdout.write(`${JSON.stringify(items, null, 2)}\n`);
+    return 0;
+  }
+
+  const grounding = { fulltext: 0, abstract: 0, metadata: 0 };
+  for (const item of items) grounding[item.custom.suniv.grounding]++;
+
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        query: options.doi ? `doi:${options.doi}` : options.query,
+        count: items.length,
+        grounding,
+        items,
+        diagnostics: contactEmail()
+          ? diagnostics
+          : {
+              ...diagnostics,
+              notes: [
+                "SUNIV_CONTACT_EMAIL is unset: OpenAlex and Crossref throttle anonymous callers, and Unpaywall refuses them outright.",
+              ],
+            },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  return 0;
+}
+
+process.exitCode = await main();

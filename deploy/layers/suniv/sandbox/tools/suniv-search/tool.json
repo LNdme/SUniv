@@ -1,0 +1,24 @@
+{
+  "id": "suniv-search",
+  "label": "Academic literature search",
+  "advertise": "suniv-search",
+  "hints": [
+    "suniv-search is how you find literature. Never answer a bibliographic question from memory: model recall invents plausible DOIs, and a fabricated citation is the one error a researcher cannot forgive.",
+    "Every result carries custom.suniv.grounding. \"fulltext\" means an open-access copy is reachable and you may cite its sections. \"abstract\" means you may report only what the abstract states, said as such. \"metadata\" means you have title and DOI and nothing else — say the text was not available and give the DOI, never guess the objective or the method.",
+    "Pass --csl to get a bare CSL-JSON array for pandoc or Zotero; the default envelope adds grounding counts and per-source diagnostics.",
+    "A source listed under diagnostics.skipped needs a key the student has not supplied; one under diagnostics.failed was reachable but errored. Neither means the literature does not exist — say which happened."
+  ],
+  "egress": [
+    "api.openalex.org",
+    "api.crossref.org",
+    "export.arxiv.org",
+    "api.semanticscholar.org",
+    "www.ebi.ac.uk",
+    "api.archives-ouvertes.fr",
+    "api.core.ac.uk",
+    "api.unpaywall.org"
+  ],
+  "install": {
+    "binary": "suniv-search"
+  }
+}
