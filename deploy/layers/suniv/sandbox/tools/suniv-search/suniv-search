@@ -196,7 +196,7 @@ function dedupe(items) {
   for (const item of items) {
     const doi = normalizeDoi(item.DOI);
     const key = titleKey(item.title);
-    const existingIndex = (doi && byDoi.get(doi)) ?? (key && byTitle.get(key));
+    const existingIndex = (doi ? byDoi.get(doi) : undefined) ?? (key ? byTitle.get(key) : undefined);
     if (existingIndex !== undefined) {
       ordered[existingIndex] = mergeItems(ordered[existingIndex], item);
       const settled = ordered[existingIndex];
@@ -755,25 +755,36 @@ function parseArgs(argv) {
   return { options };
 }
 
+function interleaveByRank(lists) {
+  const out = [];
+  const deepest = Math.max(0, ...lists.map((list) => list.length));
+  for (let rank = 0; rank < deepest; rank++) {
+    for (const list of lists) {
+      if (rank < list.length) out.push(list[rank]);
+    }
+  }
+  return out;
+}
+
 async function gather(options) {
   const diagnostics = { queried: [], skipped: [], failed: [] };
   const settled = await Promise.allSettled(
     options.sources.map(async (name) => ({ name, items: await SOURCES[name](options.query, options) })),
   );
 
-  const collected = [];
+  const perSource = [];
   for (const [index, outcome] of settled.entries()) {
     const name = options.sources[index];
     if (outcome.status === "fulfilled") {
       diagnostics.queried.push({ source: name, returned: outcome.value.items.length });
-      collected.push(...outcome.value.items);
+      perSource.push(outcome.value.items);
       continue;
     }
     const reason = outcome.reason?.message || String(outcome.reason);
     if (reason.includes("is not set")) diagnostics.skipped.push({ source: name, reason });
     else diagnostics.failed.push({ source: name, reason });
   }
-  return { collected, diagnostics };
+  return { collected: interleaveByRank(perSource), diagnostics };
 }
 
 async function byDoi(doi) {
@@ -820,10 +831,11 @@ async function main() {
   const { options } = parsed;
   const { collected, diagnostics } = options.doi ? await byDoi(options.doi) : await gather(options);
 
-  if (!collected.length && diagnostics.failed.length && !diagnostics.queried.length) {
+  if (!diagnostics.queried.length) {
+    const unreached = [...diagnostics.skipped, ...diagnostics.failed];
     process.stderr.write(
-      `suniv-search: every source failed, so this is an outage, not an empty result.\n${diagnostics.failed
-        .map((f) => `  ${f.source}: ${f.reason}`)
+      `suniv-search: no source answered, so this is not an empty result — nothing was searched. Do not report that the literature does not exist.\n${unreached
+        .map((u) => `  ${u.source}: ${u.reason}`)
         .join("\n")}\n`,
     );
     return 1;

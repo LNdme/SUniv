@@ -10,6 +10,7 @@
   },
   "scripts": {
     "qm": "qm",
+    "test": "node --test \"test/*.test.mjs\"",
     "check": "qm check",
     "plan": "qm plan",
     "deploy": "qm up",

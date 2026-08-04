@@ -136,12 +136,15 @@ async function readApi(path, { preferLocal = true } = {}) {
   }
 }
 
+function requireWriteAccess() {
+  if (webConfigured()) return;
+  throw new ZoteroError(
+    `${describeAuth()}\n\nWriting needs the web path: Zotero's local API is read-only by design, so a key is required to create items, collections or tags.`,
+  );
+}
+
 async function writeApi(path, payload, method = "POST") {
-  if (!webConfigured()) {
-    throw new ZoteroError(
-      `${describeAuth()}\n\nWriting needs the web path: Zotero's local API is read-only by design, so a key is required to create items, collections or tags.`,
-    );
-  }
+  requireWriteAccess();
   return await request(`https://api.zotero.org${library().webPath}${path}`, {
     method,
     headers: {
@@ -315,7 +318,17 @@ async function commandStatus() {
 
 async function commandAdd(options) {
   if (!options.file) throw new ZoteroError("add needs --file with a CSL-JSON array (suniv-search --csl writes one)");
-  const raw = JSON.parse(readFileSync(options.file, "utf8"));
+  requireWriteAccess();
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync(options.file, "utf8"));
+  } catch (err) {
+    throw new ZoteroError(
+      err.code === "ENOENT"
+        ? `no such file: ${options.file} — write one first with \`suniv-search … --csl > ${options.file}\``
+        : `${options.file} is not readable as CSL-JSON: ${err.message}`,
+    );
+  }
   const works = Array.isArray(raw) ? raw : raw.items;
   if (!Array.isArray(works) || !works.length) throw new ZoteroError(`${options.file} holds no CSL-JSON items`);
 
@@ -416,11 +429,8 @@ async function main() {
         return 2;
     }
   } catch (err) {
-    if (err instanceof ZoteroError) {
-      process.stderr.write(`${err.message}\n`);
-      return 1;
-    }
-    throw err;
+    process.stderr.write(err instanceof ZoteroError ? `${err.message}\n` : `suniv-zotero: ${err.message}\n`);
+    return 1;
   }
 }
 

@@ -38,8 +38,39 @@ the scaffolded `.gitignore`.
 - `sandbox/Dockerfile` is optional and only needed for system packages or
   runtimes.
 
-The scaffold ships a working example, the `greet` skill and `example-tool`.
-Copy its shape, then replace or delete it.
+The scaffold's `greet` skill and `example-tool` have been replaced by SUniv's own;
+`sandbox/README.md` describes what is there and why.
+
+## Testing the tools
+
+```bash
+npm test
+```
+
+Run it before every commit, and **add a case with every tool change**. Nothing
+else looks at this code: the repository's `eslint.config.mjs` ignores
+`deploy/layers/`, and `oxlint` only covers `src plugins scripts cli test`. This
+suite is the whole safety net for the layer.
+
+`test/` sits outside `sandbox/` deliberately — `qm up` uploads the sandbox tree
+to the core, and test fixtures have no business being delivered to an agent.
+
+Each test runs a real tool as a subprocess with `node --import test/fetch-stub.mjs`,
+which replaces `globalThis.fetch` with fixture responses and records every call
+made. Nothing about a tool's shape has to change to be testable, and the whole
+path is exercised — argument parsing, HTTP, response parsing, output — rather
+than functions in isolation. The recorded calls are what let a test assert that a
+refusal contacted nothing, or that a group library was addressed under `/groups/`.
+
+Two cases are load-bearing and must not be deleted:
+
+- **a record without a DOI survives deduplication.** It once did not: `""` is not
+  nullish, so `??` let an empty DOI stand in for a found index and every
+  identifier-less record was dropped. That silently hid every preprint, which is
+  exactly what `disclosure-guard` and `prior-art-scan` need to see.
+- **a publisher landing page is not full text.** Treating any link as full text
+  once marked every paywalled article as retrievable, which defeats the grounding
+  ladder that `citation-integrity` rests on.
 
 ## The workflow
 
