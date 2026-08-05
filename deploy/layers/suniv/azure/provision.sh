@@ -8,7 +8,6 @@ DISK_GB="${SUNIV_AZURE_DISK_GB:-128}"
 ADMIN_USER="${SUNIV_AZURE_ADMIN_USER:-suniv}"
 IMAGE_URN="Canonical:ubuntu-24_04-lts:server:latest"
 SHUTDOWN_TIME="${SUNIV_AZURE_SHUTDOWN_TIME:-2200}"
-SHUTDOWN_TZ="${SUNIV_AZURE_SHUTDOWN_TZ:-UTC}"
 SUBSCRIPTION=""
 ADMIN_IP=""
 DNS_LABEL=""
@@ -70,8 +69,9 @@ command -v az >/dev/null 2>&1 || die "the Azure CLI is not on PATH — https://a
 [ -f "$here/cloud-init.yaml" ] || die "cloud-init.yaml is missing next to this script"
 
 case "$PREFIX" in
-  [a-z]*) : ;;
-  *) die "--prefix must start with a lowercase letter (it seeds DNS and registry names)" ;;
+  [a-z]*[!a-z0-9]*|[!a-z]*)
+    die "--prefix must be lowercase letters and digits, starting with a letter: it seeds the container registry name, and Azure rejects anything else there" ;;
+  *) : ;;
 esac
 
 if [ -n "$SUBSCRIPTION" ]; then
@@ -99,7 +99,7 @@ SUBNET_NAME="${PREFIX}-subnet"
 [ -n "$DNS_LABEL" ] || DNS_LABEL="${PREFIX}-${fingerprint}"
 [ -n "$ACR_NAME" ] || ACR_NAME="${PREFIX}acr${fingerprint}"
 
-arch="$(az vm list-skus --location "$LOCATION" --size "$VM_SIZE" --query "[?name=='$VM_SIZE'].capabilities[?name=='CpuArchitectureType'].value | [0] | [0]" -o tsv 2>/dev/null || true)"
+arch="$(az vm list-skus --location "$LOCATION" --size "$VM_SIZE" --query "[?name=='$VM_SIZE'].capabilities[] | [?name=='CpuArchitectureType'].value | [0]" -o tsv 2>/dev/null || true)"
 case "$arch" in
   Arm64) die "$VM_SIZE is Arm64 — scripts/local-sandbox-build.sh hardcodes linux/amd64, so the sandbox image would build under QEMU. Pick an x86_64 size." ;;
   "") say "warning: could not read the CPU architecture of $VM_SIZE; make sure it is x86_64" ;;
@@ -128,7 +128,7 @@ say "ssh from       $SSH_SOURCE"
 say "azure fqdn     $PUBLIC_FQDN"
 say "admin user     $ADMIN_USER"
 if [ "$NO_SHUTDOWN" -eq 0 ]; then
-  say "auto-shutdown  $SHUTDOWN_TIME $SHUTDOWN_TZ"
+  say "auto-shutdown  $SHUTDOWN_TIME UTC"
 else
   say "auto-shutdown  disabled — the VM bills around the clock"
 fi
@@ -202,26 +202,28 @@ section "Virtual machine"
 if az vm show -g "$RESOURCE_GROUP" -n "$VM_NAME" >/dev/null 2>&1; then
   say "$VM_NAME already exists — leaving it alone"
 else
-  spot_args=()
   if [ "$USE_SPOT" -eq 1 ]; then
-    spot_args=(--priority Spot --eviction-policy Deallocate --max-price -1)
+    az vm create \
+      -g "$RESOURCE_GROUP" -n "$VM_NAME" \
+      --image "$IMAGE_URN" --size "$VM_SIZE" \
+      --admin-username "$ADMIN_USER" --generate-ssh-keys \
+      --os-disk-size-gb "$DISK_GB" --storage-sku Premium_LRS \
+      --public-ip-address "$IP_NAME" --nsg "$NSG_NAME" \
+      --vnet-name "$VNET_NAME" --subnet "$SUBNET_NAME" \
+      --custom-data "$here/cloud-init.yaml" --assign-identity \
+      --priority Spot --eviction-policy Deallocate --max-price -1 \
+      -o none
+  else
+    az vm create \
+      -g "$RESOURCE_GROUP" -n "$VM_NAME" \
+      --image "$IMAGE_URN" --size "$VM_SIZE" \
+      --admin-username "$ADMIN_USER" --generate-ssh-keys \
+      --os-disk-size-gb "$DISK_GB" --storage-sku Premium_LRS \
+      --public-ip-address "$IP_NAME" --nsg "$NSG_NAME" \
+      --vnet-name "$VNET_NAME" --subnet "$SUBNET_NAME" \
+      --custom-data "$here/cloud-init.yaml" --assign-identity \
+      -o none
   fi
-  az vm create \
-    -g "$RESOURCE_GROUP" -n "$VM_NAME" \
-    --image "$IMAGE_URN" \
-    --size "$VM_SIZE" \
-    --admin-username "$ADMIN_USER" \
-    --generate-ssh-keys \
-    --os-disk-size-gb "$DISK_GB" \
-    --storage-sku Premium_LRS \
-    --public-ip-address "$IP_NAME" \
-    --nsg "$NSG_NAME" \
-    --vnet-name "$VNET_NAME" \
-    --subnet "$SUBNET_NAME" \
-    --custom-data "$here/cloud-init.yaml" \
-    --assign-identity \
-    "${spot_args[@]}" \
-    -o none
   say "created $VM_NAME"
 fi
 
@@ -229,11 +231,21 @@ section "Registry access"
 vm_identity="$(az vm show -g "$RESOURCE_GROUP" -n "$VM_NAME" --query identity.principalId -o tsv 2>/dev/null || true)"
 acr_id="$(az acr show --name "$ACR_NAME" --query id -o tsv 2>/dev/null || true)"
 if [ -n "$vm_identity" ] && [ -n "$acr_id" ]; then
-  if az role assignment create --assignee-object-id "$vm_identity" --assignee-principal-type ServicePrincipal \
-    --role AcrPush --scope "$acr_id" -o none 2>/dev/null; then
+  granted=0
+  for attempt in 1 2 3 4 5; do
+    if az role assignment create --assignee-object-id "$vm_identity" --assignee-principal-type ServicePrincipal \
+      --role AcrPush --scope "$acr_id" -o none 2>/dev/null; then
+      granted=1
+      break
+    fi
+    sleep $((attempt * 5))
+  done
+  if [ "$granted" -eq 1 ]; then
     say "granted AcrPush to the VM identity"
+    say "to use it, run 'az login --identity' on the VM before first-run.sh"
   else
-    say "AcrPush already granted, or your account cannot assign roles — see README.md"
+    say "could not grant AcrPush — the identity may still be replicating, or your account cannot assign roles."
+    say "this is not fatal: 'az login --use-device-code' on the VM pushes with your own rights instead."
   fi
 else
   say "skipped: could not resolve the VM identity or the registry id"
@@ -241,8 +253,14 @@ fi
 
 if [ "$NO_SHUTDOWN" -eq 0 ]; then
   section "Auto-shutdown"
-  az vm auto-shutdown -g "$RESOURCE_GROUP" -n "$VM_NAME" --time "$SHUTDOWN_TIME" -o none
-  say "the VM stops daily at $SHUTDOWN_TIME $SHUTDOWN_TZ; compute stops billing, the disk does not"
+  if az vm auto-shutdown -g "$RESOURCE_GROUP" -n "$VM_NAME" --time "$SHUTDOWN_TIME" -o none 2>/dev/null; then
+    say "the VM stops daily at $SHUTDOWN_TIME UTC; compute stops billing, the disk does not"
+    say "the first sandbox image build takes hours — start it early, or pass --no-shutdown until it is done"
+  else
+    say "could not schedule the shutdown (the Microsoft.DevTestLab provider may not be registered)."
+    say "register it with: az provider register --namespace Microsoft.DevTestLab"
+    say "until then the VM bills around the clock — stop it with 'az vm deallocate'."
+  fi
 fi
 
 PUBLIC_IP="$(az network public-ip show -g "$RESOURCE_GROUP" -n "$IP_NAME" --query ipAddress -o tsv)"
@@ -250,7 +268,7 @@ PUBLIC_IP="$(az network public-ip show -g "$RESOURCE_GROUP" -n "$IP_NAME" --quer
 section "Done"
 say "ssh            ssh $ADMIN_USER@$PUBLIC_IP"
 say "azure fqdn     $PUBLIC_FQDN"
-say "sslip fqdn     suniv-${PUBLIC_IP//./-}.sslip.io"
+say "sslip fqdn     ${PREFIX}-${PUBLIC_IP//./-}.sslip.io"
 say "registry       $ACR_NAME.azurecr.io"
 printf '\n'
 say "cloud-init is still running. Wait for it, then check the toolchain:"

@@ -78,14 +78,23 @@ ok "${free_gb}GB free"
 
 section "Deployment config"
 
+config_stderr="$(mktemp)"
+trap 'rm -f "$config_stderr"' EXIT
+
 config_report="$(node --input-type=module -e '
 import { loadConfigAt } from "./cli/src/config.ts";
-const { config } = loadConfigAt(process.argv[1]);
-console.log(config.publicUrl);
-console.log(config.target);
-console.log(config.sandbox?.backend ?? "");
-' "$config_path" 2>&1)" || die "could not load $config_rel:
-$config_report"
+try {
+  const { config } = loadConfigAt(process.argv[1]);
+  console.log(config.publicUrl);
+  console.log(config.target);
+  console.log(config.sandbox?.backend ?? "");
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+}
+' "$config_path" 2>"$config_stderr")" || die "$config_rel was rejected by the qm config loader:
+
+     $(cat "$config_stderr")"
 
 config_line() { printf '%s\n' "$config_report" | sed -n "${1}p"; }
 
@@ -114,20 +123,34 @@ if [ -z "$sandbox_backend" ]; then
      without an explicit SANDBOX_BACKEND. cli/src/config.ts only derives it from
      sandbox.backend, or from a \"fly\" target — neither applies here, so core would
      exit at startup.
-     \"local\" will not work either: the core container has no docker client and no
-     socket, so it cannot drive sibling containers. Set:
-       \"sandbox\": { ..., \"backend\": \"sprites\" }
-     and put SPRITES_TOKEN in the deployment .env. README.md explains why."
+     Under the docker target \"sprites\" is the only value that loads: \"local\" is
+     rejected by the config validator, and \"aws\" additionally requires target \"aws\".
+     Set:
+       \"sandbox\": { ..., \"backend\": \"sprites\" },
+       \"env\": { \"core\": { ..., \"SANDBOX_BACKEND\": \"sprites\" } }
+     Both are needed — the second is what makes qm setup ask for SPRITES_TOKEN.
+     README.md explains the whole picture, including what sprites does not give you."
 fi
-case "$sandbox_backend" in
-  local)
-    die "sandbox.backend is \"local\", which cannot work under the docker target:
-     src/sandbox/local-sandbox.ts shells out to the docker CLI and reaches the sandbox
-     over 127.0.0.1, but deploy/core/Dockerfile ships no docker client, mounts no
-     socket, and runs as USER node. Use \"sprites\" or \"aws\"." ;;
-  sprites|aws) ok "sandbox backend $sandbox_backend" ;;
-  *) die "unknown sandbox.backend \"$sandbox_backend\"" ;;
-esac
+[ "$sandbox_backend" = "sprites" ] || die "sandbox.backend is \"$sandbox_backend\"; under a docker target only \"sprites\" loads"
+ok "sandbox backend sprites"
+
+env_backend="$(node --input-type=module -e '
+import { loadConfigAt } from "./cli/src/config.ts";
+const { config } = loadConfigAt(process.argv[1]);
+console.log(config.env?.core?.SANDBOX_BACKEND ?? "");
+' "$config_path" 2>/dev/null || true)"
+
+if [ "$env_backend" != "sprites" ]; then
+  die "env.core.SANDBOX_BACKEND is not set to \"sprites\" in $config_rel.
+     sandbox.backend alone is not enough. cli/src/secrets.ts gates SPRITES_TOKEN on
+     env.core.SANDBOX_BACKEND, and under a docker target nothing supplies a default,
+     so qm setup never asks for the token and qm check never reports it missing.
+     The stack then deploys cleanly and core dies at startup on
+     \"SANDBOX_BACKEND=sprites requires SPRITES_TOKEN\".
+     Add:
+       \"env\": { \"core\": { \"HARNESS\": \"pi\", \"SANDBOX_BACKEND\": \"sprites\" } }"
+fi
+ok "env.core.SANDBOX_BACKEND is sprites, so SPRITES_TOKEN is a required secret"
 
 if [ "$STOP_AFTER_CHECKS" -eq 1 ]; then
   section "Checks passed. Stopping here as asked."
@@ -166,16 +189,55 @@ fi
 section "Static check"
 node cli/bin/qm.ts check --config "$config_path"
 
-section "Sandbox image"
+section "Sandbox layer image"
+
+layer_dockerfile="$layer_dir/sandbox/Dockerfile"
+layer_base="$(sed -n 's/^FROM  *\([^ ]*\).*/\1/p' "$layer_dockerfile" | head -n1)"
+say "layer base  $layer_base"
+
+case "$layer_base" in
+  *@sha256:*) ok "the layer base is digest-pinned, so publish will not try to resolve it" ;;
+  *)
+    [ -n "$ACR_NAME" ] || die "the layer base is the local tag \"$layer_base\", and no --acr was given.
+     qm sandbox publish resolves a non-digest base by running 'docker pull', which sends
+     \"$layer_base\" to Docker Hub and fails with 'pull access denied' — a local tag does
+     not satisfy it (cli/src/commands/sandbox.ts, pinnedByPull).
+     Re-run with --acr <registry-name> so the base can be pushed and pinned first.
+     --from will not help: publish ignores it when sandbox/Dockerfile sets its own FROM."
+
+    command -v az >/dev/null 2>&1 || die "--acr was given but the Azure CLI is not on PATH"
+    az acr login --name "$ACR_NAME" >/dev/null ||
+      die "could not sign in to $ACR_NAME — run 'az login --use-device-code' (or 'az login --identity' on the VM) first"
+    ok "signed in to $ACR_NAME.azurecr.io"
+
+    base_ref="$ACR_NAME.azurecr.io/qm-sandbox-base"
+    say "pushing $layer_base to $base_ref so it can be pinned by digest"
+    docker tag "$layer_base" "$base_ref:dev"
+    docker push "$base_ref:dev"
+    base_digest="$(docker image inspect --format '{{index .RepoDigests 0}}' "$base_ref:dev" 2>/dev/null || true)"
+    [ -n "$base_digest" ] || die "pushed $base_ref:dev but could not read its digest back"
+    ok "base pinned at $base_digest"
+
+    die "the layer Dockerfile still starts from a local tag. Change its first line to:
+
+       FROM $base_digest
+
+     in deploy/layers/suniv/sandbox/Dockerfile, then re-run this script with
+     --skip-sandbox-build. This script does not edit that file for you: the pin is a
+     deployment decision that belongs in a commit you control." ;;
+esac
+
 if [ -n "$ACR_NAME" ]; then
   command -v az >/dev/null 2>&1 || die "--acr was given but the Azure CLI is not on PATH"
-  az acr login --name "$ACR_NAME" >/dev/null || die "could not sign in to $ACR_NAME — 'az login --use-device-code' first"
-  ok "signed in to $ACR_NAME.azurecr.io"
+  az acr login --name "$ACR_NAME" >/dev/null || die "could not sign in to $ACR_NAME"
   node cli/bin/qm.ts sandbox publish --config "$config_path" --app "$ACR_NAME.azurecr.io/$SANDBOX_REPOSITORY"
 else
   say "no --acr given; publishing to the registry implied by sandbox.app in the config"
   node cli/bin/qm.ts sandbox publish --config "$config_path"
 fi
+
+say "note: publishing records the pin, but nothing in src/ reads FLY_BASE_IMAGE and the"
+say "sprites backend creates sprites by name alone — see the sandbox image section of README.md"
 
 section "Bring it up"
 say "--build-from is required: this checkout's image manifest is a placeholder"
