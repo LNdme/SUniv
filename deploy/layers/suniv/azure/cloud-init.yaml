@@ -1,0 +1,81 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - gnupg
+  - jq
+  - unzip
+  - build-essential
+  - python3
+  - python3-venv
+  - debian-keyring
+  - debian-archive-keyring
+  - apt-transport-https
+
+swap:
+  filename: /swapfile
+  size: 8589934592
+  maxsize: 8589934592
+
+write_files:
+  - path: /etc/sysctl.d/90-suniv.conf
+    content: |
+      vm.max_map_count=262144
+      vm.swappiness=10
+      fs.inotify.max_user_watches=524288
+      fs.inotify.max_user_instances=1024
+
+  - path: /etc/docker/daemon.json
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "50m", "max-file": "3" },
+        "default-address-pools": [{ "base": "172.20.0.0/16", "size": 24 }]
+      }
+
+  - path: /etc/profile.d/suniv.sh
+    content: |
+      export SUNIV_HOME=/opt/suniv
+      export PATH="$PATH:/usr/local/bin"
+
+runcmd:
+  - install -d -m 0755 /etc/apt/keyrings
+
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" > /etc/apt/sources.list.d/docker.list
+
+  - curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /etc/apt/keyrings/nodesource.asc
+  - chmod a+r /etc/apt/keyrings/nodesource.asc
+  - echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_24.x nodistro main" > /etc/apt/sources.list.d/nodesource.list
+
+  - curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key -o /etc/apt/keyrings/caddy.asc
+  - chmod a+r /etc/apt/keyrings/caddy.asc
+  - echo "deb [signed-by=/etc/apt/keyrings/caddy.asc] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" > /etc/apt/sources.list.d/caddy.list
+
+  - apt-get update
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin caddy
+
+  - systemctl enable --now docker
+  - systemctl enable caddy
+  - sysctl --system
+
+  - for u in $(ls /home); do usermod -aG docker "$u"; done
+  - install -d -m 0755 -o root -g root /opt/suniv
+
+  - npm install -g @anthropic-ai/claude-code
+
+  - curl -fsSL https://aka.ms/InstallAzureCLIDeb | bash
+
+  - node --version > /var/log/suniv-toolchain.log 2>&1
+  - docker --version >> /var/log/suniv-toolchain.log 2>&1
+  - docker buildx version >> /var/log/suniv-toolchain.log 2>&1
+  - caddy version >> /var/log/suniv-toolchain.log 2>&1
+  - claude --version >> /var/log/suniv-toolchain.log 2>&1
+  - az version >> /var/log/suniv-toolchain.log 2>&1
+
+final_message: "SUniv toolchain ready after $UPTIME seconds. Versions in /var/log/suniv-toolchain.log"
