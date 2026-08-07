@@ -1,6 +1,6 @@
 # The SUniv agent computer
 
-Eight tools and twelve skills. The tools are plumbing; the skills are the product.
+Eight tools and sixteen skills. The tools are plumbing; the skills are the product.
 
 ## Tools
 
@@ -88,6 +88,18 @@ same entries serve teammates, the paper, and a patent filing. `team-digest`
 reports what moved and what is stuck. `explain-the-brick` explains one member's
 component to another, which is what makes the collaboration educational rather
 than merely parallel.
+
+Four serve a teacher, and they arrived from a teacher already using SUniv the
+other way round — searching IEEE by hand to prepare a course, and learning in
+the process. The deliverable is a course rather than a paper and the cycle is
+weekly rather than annual, but the material is the same, so no new tool was
+needed. Each course is its own scope: three lecture courses are three memories,
+three collections, three watches. `course-design` sequences the sessions and
+files what each rests on, `lecture-draft` writes one session and exports it as a
+handout or as slides, `exercise-set` builds problems on a real paper — up to a
+question the field has not answered, which must be verified as still open before
+it is set — and `teaching-watch` reports what changed since the course last ran,
+including the result that quietly dated a slide.
 
 ## Team libraries
 

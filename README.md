@@ -38,6 +38,10 @@ rédige l'article qui le publie ou le protège.
   garde-fou qui alerte avant qu'un preprint ne détruise la brevetabilité en Europe.
 - **Travail d'équipe.** Carnet de laboratoire partagé, digest de ce qui a bougé, et
   explication de la brique qu'un coéquipier construit.
+- **Enseignement.** Un cours est un projet comme un autre : progression adossée à la
+  littérature, séances rédigées et exportées, exercices bâtis sur un article réel jusqu'à
+  une question que le domaine n'a pas tranchée, et veille sur ce qui a périmé une
+  diapositive.
 - **Veille.** Un cron surveille le domaine et ne rapporte que ce qui a changé.
 
 ## Ce que vous pouvez lui demander
@@ -94,7 +98,7 @@ crons, sandbox par utilisateur, politique de sécurité et audit, et une interfa
 
 Le noyau expose une surface d'outils fixe dont `execute`. Tout le métier SUniv arrive donc
 comme des **binaires installés dans la sandbox** et des **skills** qui apprennent à l'agent
-quand les employer — sept outils et douze skills, tous dans
+quand les employer — huit outils et seize skills, tous dans
 [`deploy/layers/suniv/`](./deploy/layers/suniv/). Le reste de l'arbre reste identique à
 l'amont, ce qui permet de continuer à en recevoir les améliorations.
 [`SUNIV.md`](./SUNIV.md) décrit la frontière et la procédure de synchronisation.
