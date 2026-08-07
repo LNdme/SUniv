@@ -1,18 +1,27 @@
 # The SUniv agent computer
 
-Six tools and seven skills. The tools are plumbing; the skills are the product.
+Eight tools and twelve skills. The tools are plumbing; the skills are the product.
 
 ## Tools
 
-| Tool            | What it reaches                                                               | Credentials                                         |
-| --------------- | ----------------------------------------------------------------------------- | --------------------------------------------------- |
-| `suniv-search`  | OpenAlex, Crossref, arXiv, Semantic Scholar, Europe PMC, HAL, CORE, Unpaywall | none (CORE and Semantic Scholar take optional keys) |
-| `suniv-zotero`  | the student's Zotero library                                                  | none to read locally; a web key to write            |
-| `suniv-indexed` | Scopus, IEEE Xplore                                                           | the student's institutional keys                    |
-| `suniv-scholar` | Google Scholar, through SerpApi only                                          | the student's SerpApi key                           |
-| `suniv-patent`  | EPO OPS, USPTO PatentsView                                                    | free credentials from each office                   |
-| `suniv-doc`     | pandoc, latexmk                                                               | none                                                |
-| `suniv-lib`     | the student's own PDFs                                                        | none                                                |
+| Tool             | What it reaches                                                               | Credentials                                         |
+| ---------------- | ----------------------------------------------------------------------------- | --------------------------------------------------- |
+| `suniv-search`   | OpenAlex, Crossref, arXiv, Semantic Scholar, Europe PMC, HAL, CORE, Unpaywall | none (CORE and Semantic Scholar take optional keys) |
+| `suniv-zotero`   | the student's Zotero library                                                  | none to read locally; a web key to write            |
+| `suniv-indexed`  | Scopus, IEEE Xplore                                                           | the student's institutional keys                    |
+| `suniv-scholar`  | Google Scholar, through SerpApi only                                          | the student's SerpApi key                           |
+| `suniv-patent`   | EPO OPS, USPTO PatentsView                                                    | free credentials from each office                   |
+| `suniv-msoffice` | Word documents on OneDrive and SharePoint, read only                          | a Microsoft Graph token                             |
+| `suniv-doc`      | pandoc, latexmk                                                               | none                                                |
+| `suniv-lib`      | the student's own PDFs                                                        | none                                                |
+
+`suniv-msoffice` is the one that is defined by what it refuses. Microsoft Graph
+cannot edit a `.docx`: it returns the whole file to replace, and every write
+fails with `423 Locked` while anyone has the document open — with no API to ask
+about the lock beforehand. Replacing a shared thesis while a supervisor
+annotates it destroys their work, so the tool reads, searches and reports
+versions, and `suniv-msoffice write` exists only to explain that writing belongs
+in the Word add-in, where insertions arrive as tracked changes.
 
 Each tool is one self-contained executable. The layer build copies
 `tools/<id>/<binary>` and nothing beside it, so a tool that imported a sibling
@@ -29,23 +38,33 @@ half of SUniv works and the writing half reports missing binaries;
 been built** — it was written where Docker was unavailable, so the only thing
 verified is that `qm check` accepts it.
 
-Its `FROM` is `qm-sandbox-base:dev`, which is what `scripts/local-sandbox-build.sh`
-tags when it builds `fly/Dockerfile`. So the base must exist before the layer
-can stack on it:
+Its `FROM` is `registry.fly.io/suniv-sandboxes:dev` — a **registry** reference,
+not the `qm-sandbox-base:dev` local tag it first carried. That distinction
+decides whether the layer can be published at all: `qm sandbox publish` resolves
+its base to an immutable digest by pulling it
+(`pinnedByPull`, `cli/src/commands/sandbox.ts`), and a tag that exists only in a
+local daemon resolves to `docker.io/library/qm-sandbox-base:dev`, which does not
+exist. `qm sandbox build` tolerates a local tag because it neither pushes nor
+pins; `publish` does not, and both the docker and fly targets require a published
+image (`requiresSandboxApp` in `cli/src/commands/check.ts`).
+
+`scripts/local-sandbox-build.sh` already pushes that exact tag when
+`FLY_SANDBOX_APP_NAME` is set — it builds `fly/Dockerfile` on Fly's remote amd64
+builder, which is also the one step of the chain that needs no local Docker:
 
 ```bash
-npm run sandbox:local:build     # from the repository root, builds qm-sandbox-base:dev
-npm exec qm -- sandbox publish  # from this deployment directory
+FLY_SANDBOX_APP_NAME=suniv-sandboxes npm run sandbox:local:build   # repository root
+node cli/bin/qm.ts sandbox publish --config deploy/layers/suniv/qm.config.fly.jsonc
 ```
 
-Skipping the first command fails on a missing image rather than on anything
-that names the real cause.
+`publish` records the resulting digest as `sandbox.image`, and the base digest as
+`sandbox.baseImage`. Once `baseImage` is recorded, the CLI substitutes it into
+this `FROM` at build time, so later builds stop depending on what `:dev` points
+at. A layer Dockerfile always sets its own base, so `sandbox publish --from` is
+ignored once this file exists.
 
-A deployment running published images rather than this source checkout pins its
-own base: set `sandbox.baseImage` in `qm.config.jsonc` to the digest-pinned
-reference and change `FROM` to that same repository without the digest. The CLI
-then substitutes the pin at build time. A layer Dockerfile always sets its own
-base, so `sandbox publish --from` is ignored once this file exists.
+`.github/workflows/suniv-sandbox-image.yml` runs both commands where Docker
+exists. [`../FLY.md`](../FLY.md) is the runbook.
 
 The TeX packages are the bulk of the image. Drop the `latexmk`/`texlive` lines
 if the deployment only needs Word and Markdown output; `suniv-doc` will say PDF

@@ -1,0 +1,21 @@
+{
+  "id": "suniv-msoffice",
+  "label": "Word documents on OneDrive and SharePoint",
+  "advertise": "suniv-msoffice",
+  "hints": [
+    "suniv-msoffice finds and describes the Word documents a student or a team already keeps in Microsoft 365 — the shared thesis, the supervisor's annotated chapter, the lab's report. Reach for it when the work lives in OneDrive or SharePoint rather than in a local file.",
+    "It never writes. Microsoft Graph cannot edit a .docx in place: it returns the whole file to replace, and every write fails with 423 Locked while anyone has the document open, with no API to check the lock beforehand. Replacing a shared thesis while a supervisor annotates it destroys their work. Say that plainly instead of attempting a write.",
+    "Writing into a shared document happens in the Word add-in, which edits the live document inside the student's own Word session with tracked changes on, so the student accepts or rejects each insertion. To draft outside Microsoft 365, write Markdown and convert with suniv-doc.",
+    "`suniv-msoffice versions --item` recovers what a document looked like before an edit. Offer it before anyone concludes a paragraph is lost — SharePoint keeps that history automatically.",
+    "Run `suniv-msoffice --status` before concluding Microsoft 365 is unreachable. A 401 almost always means the access token expired — they last about an hour — not that access was withdrawn."
+  ],
+  "egress": ["graph.microsoft.com"],
+  "auth": {
+    "check": "suniv-msoffice --status",
+    "reauth": "Sign in to Microsoft 365 with the delegated scopes Files.ReadWrite, offline_access and User.Read, then set MSGRAPH_ACCESS_TOKEN.",
+    "credentialPaths": [{ "path": ".config/suniv/msoffice.env", "kind": "file" }]
+  },
+  "install": {
+    "binary": "suniv-msoffice"
+  }
+}

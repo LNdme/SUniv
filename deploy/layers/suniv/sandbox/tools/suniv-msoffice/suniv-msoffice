@@ -1,0 +1,270 @@
+#!/usr/bin/env node
+const USAGE = `usage: suniv-msoffice <command> [options]
+
+  list [--path P]           documents in a OneDrive or SharePoint folder
+  find <terms>              search the drive by name and content
+  get --item ID             one document: size, who touched it last, webUrl
+  versions --item ID        the version history Word and SharePoint keep
+  share --item ID           the sharing links and who holds them
+  write                     refuses, and explains what to do instead
+  --status                  what the current token allows
+
+  --drive ID                a drive other than the signed-in user's
+  --limit N                 results to return (default 25)
+  --word                    only .docx and .doc
+
+This reads and organizes documents. It never writes one, and that is a design
+decision rather than a missing feature: Microsoft Graph does not edit a .docx,
+it hands back a binary stream to replace whole, and every write returns
+423 Locked while anyone has the document open — with no API to ask about the
+lock first. An agent that replaces the file while a supervisor is annotating
+chapter 3 destroys their work.
+
+Writing belongs in the Word add-in, which edits the live document from inside
+the student's own Word session with tracked changes on.`;
+
+const KEY = "MSGRAPH_ACCESS_TOKEN";
+const GRAPH = "https://graph.microsoft.com/v1.0";
+const WORD = /\.docx?$/i;
+
+function refuse(reason) {
+  process.stderr.write(`suniv-msoffice: ${reason}\n\n${USAGE}\n`);
+  return 2;
+}
+
+async function graph(path, params = {}) {
+  const url = new URL(`${GRAPH}${path}`);
+  for (const [name, value] of Object.entries(params)) {
+    if (value !== undefined) url.searchParams.set(name, String(value));
+  }
+
+  const control = new AbortController();
+  const timer = setTimeout(() => control.abort(), 30000);
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: { accept: "application/json", authorization: `Bearer ${process.env[KEY]}` },
+      signal: control.signal,
+    });
+  } catch (err) {
+    throw new Error(err.name === "AbortError" ? "Microsoft Graph timed out" : `Microsoft Graph: ${err.message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const body = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    throw new Error(
+      `Microsoft Graph rejected ${KEY}. Graph access tokens last about an hour; refresh it rather than assuming the account lost access.`,
+    );
+  }
+  if (response.status === 403) {
+    throw new Error(
+      `Microsoft Graph refused the request with the current consent. Files.ReadWrite, offline_access and User.Read are the scopes SUniv asks for; a tenant administrator may have withheld one.`,
+    );
+  }
+  if (response.status === 404) throw new Error(`Microsoft Graph found nothing at ${path}`);
+  if (response.status === 429) {
+    const retry = response.headers.get("retry-after");
+    throw new Error(`Microsoft Graph is throttling this tenant${retry ? `; retry after ${retry}s` : ""}`);
+  }
+  if (!response.ok) throw new Error(body?.error?.message || `Microsoft Graph HTTP ${response.status}`);
+  return body;
+}
+
+function driveRoot(options) {
+  return options.drive ? `/drives/${options.drive}` : "/me/drive";
+}
+
+function itemPath(options) {
+  return `${driveRoot(options)}/items/${options.item}`;
+}
+
+function toDocument(entry) {
+  const name = entry.name || "";
+  return {
+    id: entry.id,
+    name,
+    isWord: WORD.test(name),
+    isFolder: Boolean(entry.folder),
+    size: entry.size,
+    webUrl: entry.webUrl,
+    lastModified: entry.lastModifiedDateTime,
+    lastModifiedBy: entry.lastModifiedBy?.user?.displayName,
+    createdBy: entry.createdBy?.user?.displayName,
+    parentPath: entry.parentReference?.path,
+  };
+}
+
+function emit(payload) {
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  return 0;
+}
+
+async function commandList(options) {
+  const base = driveRoot(options);
+  const path = options.path ? `${base}/root:/${options.path.replace(/^\/+/, "")}:/children` : `${base}/root/children`;
+  const body = await graph(path, { $top: options.limit });
+  let documents = (body.value || []).map(toDocument);
+  if (options.word) documents = documents.filter((doc) => doc.isWord || doc.isFolder);
+  return emit({ drive: options.drive || "me", path: options.path || "/", count: documents.length, documents });
+}
+
+async function commandFind(options) {
+  const terms = options._.slice(1).join(" ").trim();
+  if (!terms) throw new Error("find needs search terms");
+  const escaped = terms.replace(/'/g, "''");
+  const body = await graph(`${driveRoot(options)}/root/search(q='${encodeURIComponent(escaped)}')`, {
+    $top: options.limit,
+  });
+  let documents = (body.value || []).map(toDocument);
+  if (options.word) documents = documents.filter((doc) => doc.isWord);
+  return emit({ terms, count: documents.length, documents });
+}
+
+async function commandGet(options) {
+  if (!options.item) throw new Error("get needs --item");
+  const entry = await graph(itemPath(options));
+  const document = toDocument(entry);
+  return emit({
+    document,
+    note: document.isWord
+      ? "Open webUrl in Word to write. Editing through this tool is not offered — the add-in writes into the live document with tracked changes."
+      : "Not a Word document; suniv-doc converts Markdown, .docx and .tex outside Microsoft 365.",
+  });
+}
+
+async function commandVersions(options) {
+  if (!options.item) throw new Error("versions needs --item");
+  const body = await graph(`${itemPath(options)}/versions`, { $top: options.limit });
+  return emit({
+    item: options.item,
+    count: (body.value || []).length,
+    versions: (body.value || []).map((version) => ({
+      id: version.id,
+      size: version.size,
+      lastModified: version.lastModifiedDateTime,
+      lastModifiedBy: version.lastModifiedBy?.user?.displayName,
+    })),
+    note: "SharePoint keeps these automatically. A supervisor's earlier draft is recoverable here, which is worth saying before anyone panics about a lost paragraph.",
+  });
+}
+
+async function commandShare(options) {
+  if (!options.item) throw new Error("share needs --item");
+  const body = await graph(`${itemPath(options)}/permissions`);
+  return emit({
+    item: options.item,
+    count: (body.value || []).length,
+    permissions: (body.value || []).map((permission) => ({
+      id: permission.id,
+      roles: permission.roles,
+      scope: permission.link?.scope,
+      type: permission.link?.type,
+      webUrl: permission.link?.webUrl,
+      grantedTo: (permission.grantedToIdentitiesV2 || [])
+        .map((identity) => identity.user?.displayName || identity.user?.email)
+        .filter(Boolean),
+    })),
+    note: "Read only. Creating or revoking a share is the student's decision to make in OneDrive, not the agent's.",
+  });
+}
+
+function commandWrite() {
+  process.stderr.write(
+    `suniv-msoffice: this tool does not write to Word documents, and no option enables it.\n` +
+      `Microsoft Graph replaces a .docx wholesale rather than editing it, and returns 423 Locked whenever the document is open — which it is, during co-authoring, exactly when a thesis is being worked on.\n` +
+      `Write through the Word add-in instead: it edits the live document from inside the student's Word session with changeTrackingMode set, so every insertion arrives as a tracked change the student accepts or rejects.\n` +
+      `To draft outside Microsoft 365, use suniv-doc and hand back a .docx.\n`,
+  );
+  return 2;
+}
+
+function commandStatus() {
+  return emit({
+    provider: "microsoft-graph",
+    configured: Boolean(process.env[KEY]),
+    writes: false,
+    scopes: ["Files.ReadWrite", "offline_access", "User.Read"],
+    note: "Reads and organizes OneDrive and SharePoint documents. Writing a shared .docx goes through the Word add-in, never through Graph: Graph replaces the whole file and returns 423 Locked while anyone has it open.",
+    tokenLifetime: "A Graph access token lasts about an hour; a 401 usually means it expired, not that access was withdrawn.",
+  });
+}
+
+function parseArgs(argv) {
+  const options = { limit: 25, _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const next = () => argv[++i];
+    switch (arg) {
+      case "-h":
+      case "--help":
+        return { help: true };
+      case "--status":
+        options.status = true;
+        break;
+      case "--drive":
+        options.drive = next();
+        break;
+      case "--item":
+        options.item = next();
+        break;
+      case "--path":
+        options.path = next();
+        break;
+      case "--limit":
+        options.limit = Number.parseInt(next(), 10);
+        break;
+      case "--word":
+        options.word = true;
+        break;
+      default:
+        if (arg.startsWith("--")) return { error: `unknown option ${arg}` };
+        options._.push(arg);
+    }
+  }
+  return { options };
+}
+
+async function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.help) {
+    process.stdout.write(`${USAGE}\n`);
+    return 0;
+  }
+  if (parsed.error) return refuse(parsed.error);
+
+  const { options } = parsed;
+  const [command] = options._;
+  if (options.status || command === "status") return commandStatus();
+  if (command === "write") return commandWrite();
+
+  if (!process.env[KEY]) {
+    return refuse(
+      `${KEY} is not set. Sign in to Microsoft 365 through the connector, which stores the token in the keychain; SUniv does not hold Microsoft credentials of its own.`,
+    );
+  }
+
+  try {
+    switch (command) {
+      case undefined:
+      case "list":
+        return await commandList(options);
+      case "find":
+        return await commandFind(options);
+      case "get":
+        return await commandGet(options);
+      case "versions":
+        return await commandVersions(options);
+      case "share":
+        return await commandShare(options);
+      default:
+        return refuse(`unknown command "${command}"`);
+    }
+  } catch (err) {
+    process.stderr.write(`suniv-msoffice: ${err.message}\n`);
+    return 1;
+  }
+}
+
+process.exitCode = await main();

@@ -56,6 +56,7 @@ test("every tool answers --help without credentials", () => {
     "suniv-doc",
     "suniv-lib",
     "suniv-patent",
+    "suniv-msoffice",
   ]) {
     const { code, stdout } = runTool(tool, ["--help"], { fixture: FIXTURE });
     assert.equal(code, 0, `${tool} --help must succeed`);

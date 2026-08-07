@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY tools/suniv-doc/suniv-doc /usr/local/bin/suniv-doc
 COPY tools/suniv-indexed/suniv-indexed /usr/local/bin/suniv-indexed
 COPY tools/suniv-lib/suniv-lib /usr/local/bin/suniv-lib
+COPY tools/suniv-msoffice/suniv-msoffice /usr/local/bin/suniv-msoffice
 COPY tools/suniv-patent/suniv-patent /usr/local/bin/suniv-patent
 COPY tools/suniv-scholar/suniv-scholar /usr/local/bin/suniv-scholar
 COPY tools/suniv-search/suniv-search /usr/local/bin/suniv-search
