@@ -13,7 +13,7 @@ Eight tools and sixteen skills. The tools are plumbing; the skills are the produ
 | `suniv-patent`   | EPO OPS, USPTO PatentsView                                                    | free credentials from each office                   |
 | `suniv-msoffice` | Word documents on OneDrive and SharePoint, read only                          | a Microsoft Graph token                             |
 | `suniv-doc`      | pandoc, latexmk                                                               | none                                                |
-| `suniv-lib`      | the student's own PDFs                                                        | none                                                |
+| `suniv-lib`      | the student's own PDFs, and optionally a GROBID server                        | none                                                |
 
 `suniv-msoffice` is the one that is defined by what it refuses. Microsoft Graph
 cannot edit a `.docx`: it returns the whole file to replace, and every write
@@ -66,7 +66,31 @@ ignored once this file exists.
 `.github/workflows/suniv-sandbox-image.yml` runs both commands where Docker
 exists. [`../FLY.md`](../FLY.md) is the runbook.
 
-The TeX packages are the bulk of the image. Drop the `latexmk`/`texlive` lines
+## Reading a paper's structure
+
+`suniv-lib sections` matches headings with a pattern. That works on numbered
+papers and on the conventional capitalised words, and it returns nothing at all
+on a paper that numbers nothing — which the test suite fixes as a documented
+limit rather than leaving as a surprise.
+
+`--grobid <url>`, or `SUNIV_GROBID_URL`, sends the PDF to a GROBID server
+instead and reads the TEI it returns: the document's own divisions, its title,
+and its reference count. GROBID is itself a container the student or the
+deployment runs, so it stays optional; nothing depends on it being there.
+
+The output always carries `source: "grobid" | "headings"`, and a GROBID that is
+down or at capacity degrades to the pattern with `grobidError` set rather than
+failing the command or, worse, presenting matched headings as a parsed
+structure. TEI carries no page numbers, so each heading's page is found by
+locating its text in the extracted pages, and is absent when the two do not
+line up.
+
+This path has never run against a real GROBID. The TEI fixture is written from
+the format, not captured from a server.
+
+## The TeX packages
+
+They are the bulk of the image. Drop the `latexmk`/`texlive` lines
 if the deployment only needs Word and Markdown output; `suniv-doc` will say PDF
 export is unavailable rather than failing obscurely.
 

@@ -10,8 +10,8 @@ function library() {
   return join(mkdtempSync(join(tmpdir(), "suniv-lib-test-")), "library.json");
 }
 
-function lib(args, index) {
-  return runTool("suniv-lib", args, { env: { SUNIV_LIBRARY: index } });
+function lib(args, index, fixture) {
+  return runTool("suniv-lib", args, { env: { SUNIV_LIBRARY: index }, ...(fixture ? { fixture } : {}) });
 }
 
 function indexed(pages = NUMBERED_PAPER, name = "paper.pdf") {
@@ -116,4 +116,79 @@ test("list names the index file, so a missing library is diagnosable", () => {
   const { json } = lib(["list"], index);
   assert.equal(json.indexFile, index);
   assert.equal(json.count, 0);
+});
+
+test("the heuristic names itself as the source, so it is never mistaken for a parse", () => {
+  const { index, pdf } = indexed();
+  const { json } = lib(["sections", "--file", pdf], index);
+  assert.equal(json.source, "headings");
+  assert.equal(json.references, undefined, "the pattern reads headings, and knows nothing about references");
+});
+
+test("GROBID parses the paper the heuristic cannot read", () => {
+  const { index, pdf } = indexed(UNNUMBERED_PAPER, "unnumbered.pdf");
+  const { code, json } = lib(
+    ["sections", "--file", pdf, "--grobid", "http://grobid.local:8070"],
+    index,
+    "./fixtures/grobid.mjs",
+  );
+
+  assert.equal(code, 0);
+  assert.equal(json.source, "grobid");
+  assert.deepEqual(
+    json.sections.map((section) => section.heading),
+    ["What we set out to do", "2 How we went about it"],
+  );
+  assert.equal(json.references, 2, "the reference list is what prior-art-scan will want next");
+});
+
+test("GROBID's own title replaces the guess, entities decoded", () => {
+  const { index, pdf } = indexed(UNNUMBERED_PAPER, "unnumbered.pdf");
+  const { json } = lib(
+    ["sections", "--file", pdf, "--grobid", "http://grobid.local:8070"],
+    index,
+    "./fixtures/grobid.mjs",
+  );
+  assert.equal(json.titleGuess, "A Study Without Any Conventional Section Numbering");
+});
+
+test("a GROBID heading is mapped back to the page it appears on", () => {
+  const { index, pdf } = indexed(UNNUMBERED_PAPER, "unnumbered.pdf");
+  const { json } = lib(
+    ["sections", "--file", pdf, "--grobid", "http://grobid.local:8070"],
+    index,
+    "./fixtures/grobid.mjs",
+  );
+  assert.equal(json.sections[0].page, 2, "TEI carries no pages, so the heading text is located in the extracted text");
+});
+
+test("SUNIV_GROBID_URL selects the parser without a flag, and the PDF is posted", () => {
+  const { index, pdf } = indexed(UNNUMBERED_PAPER, "unnumbered.pdf");
+  const { json, calls } = runTool("suniv-lib", ["sections", "--file", pdf], {
+    fixture: "./fixtures/grobid.mjs",
+    env: { SUNIV_LIBRARY: index, SUNIV_GROBID_URL: "http://grobid.local:8070/" },
+  });
+  assert.equal(json.source, "grobid");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, "POST");
+  assert.equal(
+    calls[0].url,
+    "http://grobid.local:8070/api/processFulltextDocument",
+    "a trailing slash must not double",
+  );
+});
+
+test("a busy GROBID degrades to the heuristic and says both things happened", () => {
+  const { index, pdf } = indexed(NUMBERED_PAPER, "paper.pdf");
+  const { code, json } = lib(
+    ["sections", "--file", pdf, "--grobid", "http://grobid.local:8070"],
+    index,
+    "./fixtures/grobid-busy.mjs",
+  );
+
+  assert.equal(code, 0);
+  assert.equal(json.source, "headings", "a failed parse must not be reported as a parse");
+  assert.match(json.grobidError, /at capacity \(503\)/);
+  assert.match(json.note, /GROBID was asked first and failed/);
+  assert.ok(json.sections.some((section) => section.heading === "3.2 Experimental setup"));
 });

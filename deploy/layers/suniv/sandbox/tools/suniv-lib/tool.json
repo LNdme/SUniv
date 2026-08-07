@@ -5,7 +5,8 @@
   "hints": [
     "suniv-lib indexes PDFs the student already holds. When an article is paywalled and suniv-search returns metadata only, ask whether they have the PDF: their own copy is often the only place its full text legitimately exists for them, and it moves the work from metadata grounding to full text.",
     "`suniv-lib search` returns the page a passage sits on and `suniv-lib sections` returns the headings, so a claim can be attributed to a section the student can find in their own copy rather than to the article as a whole.",
-    "The index is local and needs no network. Re-run `suniv-lib index --dir` after the student adds papers; unchanged files are skipped."
+    "The index is local and needs no network. Re-run `suniv-lib index --dir` after the student adds papers; unchanged files are skipped.",
+    "`suniv-lib sections` reads headings with a pattern, which finds them in numbered papers and returns nothing in papers that number nothing. When it comes back empty and the structure matters — citing a method by its section, or building an exercise on one — a GROBID server parses the document's real structure: pass --grobid or set SUNIV_GROBID_URL. The output always names which of the two produced the sections, so never present pattern-matched headings as a parsed structure or the reverse. GROBID is expected to run alongside the sandbox and no external host is declared here; pointing it at a remote server needs that host added to this tool's egress."
   ],
   "install": {
     "binary": "suniv-lib"

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 
 const USAGE = `usage: suniv-lib <command> [options]
@@ -9,12 +9,18 @@ const USAGE = `usage: suniv-lib <command> [options]
   index --dir DIR            read every PDF under DIR into the local index
   search <terms> [--limit N] find passages, with the page they sit on
   sections --file PATH       list the section headings of one PDF
+           [--grobid URL]    parse the structure with a GROBID server instead
   text --file PATH [--page N]
   list                       what the index holds
 
 The index is the student's own PDFs — what they have already downloaded or
 been given. It needs no network and no subscription, and it is often the only
-place the full text of a paywalled article legitimately exists for them.`;
+place the full text of a paywalled article legitimately exists for them.
+
+sections reads headings with a pattern by default, which handles numbered and
+conventionally capitalised papers and returns nothing on the rest. Point
+--grobid, or SUNIV_GROBID_URL, at a GROBID server to get the real structure of
+those. The output always says which of the two produced it.`;
 
 function indexPath() {
   return process.env.SUNIV_LIBRARY || join(homedir(), ".local", "share", "suniv", "library.json");
@@ -183,19 +189,109 @@ function documentFor(path) {
   return { path: wanted, pageCount: pages.length, titleGuess: guessTitle(pages), headings: headings(pages), pages };
 }
 
-function commandSections(options) {
+function decodeXml(text) {
+  return text
+    .replace(/<[^>]*>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseTei(xml) {
+  const body = /<body\b[^>]*>([\s\S]*?)<\/body>/.exec(xml)?.[1] ?? "";
+  const headings = [];
+  for (const match of body.matchAll(/<head\b([^>]*)>([\s\S]*?)<\/head>/g)) {
+    const number = /\bn="([^"]*)"/.exec(match[1])?.[1];
+    const text = decodeXml(match[2]);
+    if (!text) continue;
+    headings.push({ heading: [number, text].filter(Boolean).join(" "), number });
+  }
+  return {
+    title: decodeXml(/<title\b[^>]*type="main"[^>]*>([\s\S]*?)<\/title>/.exec(xml)?.[1] ?? "") || undefined,
+    headings,
+    references: (xml.match(/<biblStruct\b/g) || []).length,
+  };
+}
+
+async function grobidStructure(base, path) {
+  const form = new FormData();
+  form.append("input", new Blob([readFileSync(path)], { type: "application/pdf" }), basename(path));
+  form.append("segmentSentences", "0");
+
+  const control = new AbortController();
+  const timer = setTimeout(() => control.abort(), 120000);
+  let response;
+  try {
+    response = await fetch(`${base}/api/processFulltextDocument`, {
+      method: "POST",
+      body: form,
+      signal: control.signal,
+    });
+  } catch (err) {
+    throw new Error(err.name === "AbortError" ? "GROBID timed out" : `GROBID: ${err.message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (response.status === 503) throw new Error("GROBID is at capacity (503); it queues requests and refuses when full");
+  if (!response.ok) throw new Error(`GROBID HTTP ${response.status}`);
+  return parseTei(await response.text());
+}
+
+function pageOf(pages, heading) {
+  const needle = heading.toLowerCase();
+  const index = pages.findIndex((page) => page.toLowerCase().includes(needle));
+  return index === -1 ? undefined : index + 1;
+}
+
+async function commandSections(options) {
   if (!options.file) throw new Error("sections needs --file");
   const doc = documentFor(options.file);
+  const base = (options.grobid || process.env.SUNIV_GROBID_URL || "").replace(/\/+$/, "");
+
+  let sections = doc.headings;
+  let source = "headings";
+  let titleGuess = doc.titleGuess;
+  let references;
+  let grobidError;
+
+  if (base) {
+    try {
+      const tei = await grobidStructure(base, doc.path);
+      sections = tei.headings.map((entry) => ({
+        page: pageOf(doc.pages, entry.number ? entry.heading.slice(entry.number.length).trim() : entry.heading),
+        heading: entry.heading,
+      }));
+      source = "grobid";
+      if (tei.title) titleGuess = tei.title;
+      references = tei.references;
+    } catch (err) {
+      grobidError = err.message;
+    }
+  }
+
+  const note =
+    source === "grobid"
+      ? "GROBID parsed the document's own structure. Cite a claim by the heading it sits under; page is where that heading's text appears in the extracted text, and is absent when the two do not line up."
+      : sections.length
+        ? "Cite a claim by the heading it sits under, so the student can find it in their own copy."
+        : "No headings matched the usual patterns; read the pages directly rather than inventing a structure. A GROBID server would parse this paper's real structure — see --grobid.";
+
   process.stdout.write(
     `${JSON.stringify(
       {
         path: doc.path,
-        titleGuess: doc.titleGuess,
+        titleGuess,
         pageCount: doc.pageCount,
-        sections: doc.headings,
-        note: doc.headings.length
-          ? "Cite a claim by the heading it sits under, so the student can find it in their own copy."
-          : "No headings matched the usual patterns; read the pages directly rather than inventing a structure.",
+        source,
+        sections,
+        references,
+        grobidError,
+        note: grobidError ? `${note} GROBID was asked first and failed: ${grobidError}` : note,
       },
       null,
       2,
@@ -248,6 +344,9 @@ function parseArgs(argv) {
       case "--file":
         options.file = next();
         break;
+      case "--grobid":
+        options.grobid = next();
+        break;
       case "--page":
         options.page = Number.parseInt(next(), 10);
         break;
@@ -262,7 +361,7 @@ function parseArgs(argv) {
   return { options };
 }
 
-function main() {
+async function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.help) {
     process.stdout.write(`${USAGE}\n`);
@@ -285,7 +384,7 @@ function main() {
       case "search":
         return commandSearch(options);
       case "sections":
-        return commandSections(options);
+        return await commandSections(options);
       case "text":
         return commandText(options);
       default:
@@ -298,4 +397,4 @@ function main() {
   }
 }
 
-process.exitCode = main();
+process.exitCode = await main();
