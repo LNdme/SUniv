@@ -9,6 +9,12 @@ has been executed by a model, and no tool has run inside a real sandbox through
 specific to SUniv or to this source checkout — the things that otherwise cost an
 afternoon to rediscover.
 
+This is the **local docker** runbook, driven by `qm.config.jsonc`.
+[`FLY.md`](./FLY.md) is the hosted one, driven by `qm.config.fly.jsonc`; almost
+all of it needs no Docker daemon, which makes it the shorter road to a running
+deployment when this machine has none. The two configs share one `.env`, so the
+secrets below are collected once for both.
+
 ## Before sitting down: twenty minutes of forms
 
 Five free keys unlock half of what is currently unverifiable. None needs an
@@ -23,8 +29,9 @@ institution, and each takes two or three minutes.
 | `PATENTSVIEW_API_KEY`               | patentsview.org/apis/keyrequest              | US patents                                                                       |
 
 Also needed, and not free: an **Anthropic (or OpenAI/OpenRouter) key** for the
-model, and a **Resend account or SMTP credentials** — the `auth` broker emails
-the sign-in links, so without it nobody can log in, including you.
+model, a **Resend account or SMTP credentials** — the `auth` broker emails the
+sign-in links, so without it nobody can log in, including you — and a **Fly
+account**, because the sandbox image is pushed to Fly's registry on every target.
 
 Institutional keys (Elsevier, IEEE) are worth collecting if you have them, but
 note that a Scopus key is bound to the campus IP ranges: it will fail from any
@@ -45,14 +52,24 @@ npm install                     # repository root
 CFG=deploy/layers/suniv/qm.config.jsonc
 ```
 
-**1. Build the sandbox base:**
+**1. Build and push the sandbox base:**
 
 ```bash
-npm run sandbox:local:build
+fly apps create suniv-sandboxes --org personal
+FLY_SANDBOX_APP_NAME=suniv-sandboxes npm run sandbox:local:build
 ```
 
-This tags `qm-sandbox-base:dev` from `fly/Dockerfile`. `sandbox/Dockerfile`
-stacks on that tag, so the layer image cannot build before it exists.
+The sandbox image lives in Fly's registry on **both** targets — `sandbox.app` is
+required for docker too (`requiresSandboxApp` in `cli/src/commands/check.ts`) —
+so a Fly account and a deploy token are needed even for a local deployment. Mint
+the token with `fly tokens create deploy --app suniv-sandboxes` and put it in
+`.env` as `FLY_SANDBOX_API_TOKEN`.
+
+With `FLY_SANDBOX_APP_NAME` set, the script builds `fly/Dockerfile` on Fly's
+remote builder and pushes `registry.fly.io/suniv-sandboxes:dev`, which is what
+`sandbox/Dockerfile` names in its `FROM`. Without it the script only tags a local
+image, and `sandbox publish` then fails resolving that tag to a digest — a local
+tag resolves to `docker.io/library/…`, which does not exist.
 
 **2. Collect the secrets:**
 

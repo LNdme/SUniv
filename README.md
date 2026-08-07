@@ -142,6 +142,12 @@ espace réservé. [`deploy/layers/suniv/FIRST-RUN.md`](./deploy/layers/suniv/FIR
 donne la séquence complète, les clés gratuites à récupérer d'avance, et l'ordre des
 vérifications.
 
+Sans démon Docker, `qm.config.fly.jsonc` déploie les mêmes services sur Fly, dont le
+constructeur distant fabrique les images de service ; seule celle de la sandbox demande
+encore Docker quelque part, et un workflow GitHub Actions s'en charge.
+[`deploy/layers/suniv/FLY.md`](./deploy/layers/suniv/FLY.md) décrit cette voie, ses coûts,
+et ce qu'elle ne résout pas — les clés Scopus et IEEE restent liées à l'IP du campus.
+
 Pour travailler sur la couche elle-même :
 
 ```bash

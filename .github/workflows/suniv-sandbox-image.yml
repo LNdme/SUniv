@@ -1,0 +1,93 @@
+name: SUniv sandbox image
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: Fly app owning the sandbox registry repository
+        required: false
+        default: suniv-sandboxes
+      org:
+        description: Fly organization slug that owns the app
+        required: false
+        default: personal
+
+concurrency:
+  group: suniv-sandbox-image
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish the layer image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CFG: deploy/layers/suniv/qm.config.fly.jsonc
+      FLY_SANDBOX_APP_NAME: ${{ inputs.app }}
+      FLY_ORG: ${{ inputs.org }}
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      FLY_SANDBOX_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Require a Fly deploy token
+        run: |
+          if [ -z "${FLY_API_TOKEN}" ]; then
+            echo "::error::FLY_API_TOKEN is not set. Create a Fly deploy token and add it as a repository secret; deploy/layers/suniv/FLY.md has the command." >&2
+            exit 1
+          fi
+
+      - name: Install flyctl
+        run: |
+          curl -fsSL https://fly.io/install.sh | FLYCTL_INSTALL=/usr/local sh -s "${FLYCTL_VERSION}"
+          fly version
+        env:
+          FLYCTL_VERSION: 0.3.196
+
+      - name: Require the sandbox app to exist
+        run: |
+          if ! fly apps list --json | node -e '
+            let raw = "";
+            process.stdin.on("data", (chunk) => (raw += chunk));
+            process.stdin.on("end", () => {
+              const wanted = process.env.FLY_SANDBOX_APP_NAME;
+              const found = JSON.parse(raw).some((app) => app.Name === wanted || app.name === wanted);
+              process.exit(found ? 0 : 1);
+            });
+          '; then
+            echo "::error::Fly app ${FLY_SANDBOX_APP_NAME} does not exist. Run: fly apps create ${FLY_SANDBOX_APP_NAME} --org ${FLY_ORG}" >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and push the sandbox base
+        run: npm run sandbox:local:build
+
+      - name: Publish the SUniv layer image
+        run: node cli/bin/qm.ts sandbox publish --config "${CFG}"
+
+      - name: Report the recorded pins
+        run: |
+          {
+            echo '## Sandbox image published'
+            echo
+            echo 'Paste these into `'"${CFG}"'` and commit, then run `qm up`:'
+            echo
+            echo '```diff'
+            git diff -- "${CFG}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: qm.config.fly.jsonc
+          path: ${{ env.CFG }}
+          if-no-files-found: error

@@ -1,0 +1,79 @@
+{
+  // The Fly deployment of SUniv. `qm.config.jsonc` next to this file is the local
+  // docker one; both read the same `.env`, so `qm setup` is run once for both.
+  //
+  // Pass this file explicitly, because the CLI's directory search only ever finds
+  // `qm.config.jsonc`:
+  //
+  //   node cli/bin/qm.ts up --config deploy/layers/suniv/qm.config.fly.jsonc --build-from
+  //
+  // FLY.md in this directory is the runbook. Read it before the first `up`.
+  "contract": 1,
+
+  "orgId": "suniv",
+
+  // With "portal" in services, the portal app is the public front door: on the fly
+  // target it reverse-proxies to web-ui and admin over Flycast, and those two apps
+  // get no public IP. So this is the portal's hostname, and `<orgId>-portal` is the
+  // app name the CLI derives. Replace it with a custom domain once one is attached.
+  "publicUrl": "https://suniv-portal.fly.dev",
+
+  "target": "fly",
+
+  // The Fly organization slug that owns the apps. Every Fly account has "personal";
+  // a dedicated org is worth creating once more than one person deploys.
+  "flyOrg": "personal",
+
+  // Primary region for every app. "cdg" is Paris — close to the European
+  // universities SUniv is aimed at, and it keeps student data in the EU.
+  // Fly's region list: `fly platform regions`.
+  "region": "cdg",
+
+  "modelProvider": "anthropic",
+
+  "services": ["core", "web-ui", "auth", "admin", "portal"],
+
+  "plugins": [],
+
+  "skills": [],
+
+  // The fly target refuses to start without durable object storage, and says so:
+  // snapshots and transfers must go to S3, never to a machine's disk, because Fly
+  // machines are replaced on every deploy. `qm up` creates a private Tigris bucket
+  // named S3_BUCKET and stages its credentials on the core app; S3_REGION is "auto"
+  // because Tigris is globally distributed. Tigris bucket names are global, so
+  // change this one if creation reports the name is taken.
+  "env": {
+    "core": {
+      "HARNESS": "pi",
+      "SNAPSHOT_STORE": "s3",
+      "TRANSFER_STORE": "s3",
+      "S3_BUCKET": "suniv-data",
+      "S3_REGION": "auto",
+    },
+    "auth": { "AUTH_EMAIL_TRANSPORT": "resend" },
+  },
+
+  // The Fly app agents execute in. Unlike the docker target — which bind-mounts
+  // sandbox/tools and sandbox/skills straight into the core container — fly boots
+  // agents from an immutable image, so the layer must be built and pushed before
+  // `up` will render core. "sandbox.image" below is that image, pinned by digest.
+  //
+  // `qm sandbox publish` records it, and it needs a local Docker daemon
+  // (cli/src/commands/sandbox.ts calls `docker buildx`). The GitHub Actions
+  // workflow .github/workflows/suniv-sandbox-image.yml runs it where Docker
+  // exists and prints the digest to paste here. FLY.md explains the sequence.
+  //
+  // SUNIV_CONTACT_EMAIL identifies SUniv to OpenAlex and Crossref, whose "polite
+  // pools" give identified callers higher rate limits. Set it to a mailbox a
+  // maintainer actually reads.
+  //
+  // Per-student credentials (Zotero, Elsevier, IEEE, SerpApi, Microsoft Graph) are
+  // deliberately absent: they belong to the student, not the deployment, and reach
+  // the agent through the keychain and each tool's auth.credentialPaths.
+  "sandbox": {
+    "app": "suniv-sandboxes",
+    // "image": "registry.fly.io/suniv-sandboxes@sha256:…",
+    "env": { "SUNIV_CONTACT_EMAIL": "contact@suniv.example" },
+  },
+}

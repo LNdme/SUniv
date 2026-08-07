@@ -55,16 +55,19 @@
     "auth": { "AUTH_EMAIL_TRANSPORT": "resend" },
   },
 
-  // The Fly app agents execute in. The core boots the immutable sandbox image
-  // recorded by `qm sandbox publish`.
+  // The app agents execute in. Required on the docker target too, not only on fly
+  // (cli/src/commands/check.ts: requiresSandboxApp), so both targets need
+  // `qm sandbox publish` to record a digest-pinned "sandbox.image" before `up`
+  // will render core. On docker, sandbox/tools and sandbox/skills are additionally
+  // bind-mounted into the core container as /layer.
   //
   // SUNIV_CONTACT_EMAIL identifies SUniv to OpenAlex and Crossref, whose "polite pools"
   // give identified callers higher rate limits and faster responses. Set it to a mailbox
   // a maintainer actually reads: that is the deal those services offer.
   //
-  // Per-student credentials (Zotero, Elsevier, IEEE, SerpApi) are deliberately absent
-  // here. They belong to the student, not the deployment, and reach the agent through
-  // the keychain and each tool's auth.credentialPaths instead.
+  // Per-student credentials (Zotero, Elsevier, IEEE, SerpApi, Microsoft Graph) are
+  // deliberately absent here. They belong to the student, not the deployment, and reach
+  // the agent through the keychain and each tool's auth.credentialPaths instead.
   "sandbox": {
     "app": "suniv-sandboxes",
     "env": { "SUNIV_CONTACT_EMAIL": "contact@suniv.example" },
