@@ -62,7 +62,13 @@ path is exercised — argument parsing, HTTP, response parsing, output — rathe
 than functions in isolation. The recorded calls are what let a test assert that a
 refusal contacted nothing, or that a group library was addressed under `/groups/`.
 
-Two cases are load-bearing and must not be deleted:
+Most cases stub `fetch`. Three files do not: `doc.test.mjs` and `lib.test.mjs`
+run the real `pandoc` and `pdftotext`, and `fixtures/make-pdf.mjs` writes a real
+multi-page PDF in pure JavaScript so they have something to read. Those tests
+prove the behaviour rather than the shape of a response, so prefer them wherever
+a tool shells out to a binary instead of to an API.
+
+Three cases are load-bearing and must not be deleted:
 
 - **a record without a DOI survives deduplication.** It once did not: `""` is not
   nullish, so `??` let an empty DOI stand in for a found index and every
@@ -71,6 +77,11 @@ Two cases are load-bearing and must not be deleted:
 - **a publisher landing page is not full text.** Treating any link as full text
   once marked every paywalled article as retrievable, which defeats the grounding
   ladder that `citation-integrity` rests on.
+- **`suniv-msoffice write` refuses and contacts nothing.** Microsoft Graph
+  replaces a `.docx` whole and returns `423 Locked` while anyone has it open, so
+  a write attempt against a shared thesis destroys a supervisor's annotations.
+  If that test ever starts passing against a real write path, the tool has grown
+  a feature it must not have.
 
 ## The workflow
 

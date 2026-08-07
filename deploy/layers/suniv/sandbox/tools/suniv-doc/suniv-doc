@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 
 const USAGE = `usage: suniv-doc <command> [options]
@@ -112,6 +113,16 @@ function commandConvert(options) {
   if (!from) throw new Error(`cannot tell the format of ${options.input} from its extension`);
   if (!to) throw new Error(`cannot tell the format of ${options.output} from its extension`);
   if (from === "pdf") throw new Error("PDF is an output format here; use `suniv-doc text` to read one");
+  for (const [role, format, path] of [
+    ["--input", from, options.input],
+    ["--output", to, options.output],
+  ]) {
+    if (format === "csljson" || format === "biblatex") {
+      throw new Error(
+        `convert ${role} ${path} is a bibliography, not a document; use \`suniv-doc bib\` to move between CSL-JSON and BibTeX, or --bib to render citations into a document`,
+      );
+    }
+  }
 
   const args = [options.input, "-o", options.output, ...bibliographyArgs(options)];
   if (options.referenceDoc) {
@@ -131,32 +142,39 @@ function commandConvert(options) {
   return 0;
 }
 
+function requireBibliographyFormat(path, role) {
+  const format = formatOf(path);
+  if (format === "csljson" || format === "biblatex") return format;
+  throw new Error(
+    `bib ${role} must be CSL-JSON (.json) or BibTeX (.bib); ${path} is ${format ? `a ${format} file` : "of no format this recognises"}. ` +
+      `Use \`suniv-doc convert\` for documents.`,
+  );
+}
+
 function commandBib(options) {
   if (!options.input || !options.output) throw new Error("bib needs --input and --output");
   if (!existsSync(options.input)) throw new Error(`input not found: ${options.input}`);
   requireBinary("pandoc");
 
-  const from = formatOf(options.input);
-  const to = formatOf(options.output);
-  if (from === "csljson" && to === "csljson") throw new Error("input and output are both CSL-JSON");
+  const from = requireBibliographyFormat(options.input, "--input");
+  const to = requireBibliographyFormat(options.output, "--output");
+  if (from === to) throw new Error(`input and output are both ${from}; there is nothing to convert`);
 
   const source = from === "csljson" ? JSON.parse(readFileSync(options.input, "utf8")) : null;
   let inputPath = options.input;
+  let scratch;
   if (Array.isArray(source?.items)) {
-    inputPath = `${options.input}.items.json`;
+    scratch = mkdtempSync(join(tmpdir(), "suniv-doc-"));
+    inputPath = join(scratch, "items.json");
     writeFileSync(inputPath, JSON.stringify(source.items));
   }
 
-  run("pandoc", [
-    inputPath,
-    "--from",
-    from === "csljson" ? "csljson" : "biblatex",
-    "--to",
-    to === "csljson" ? "csljson" : "biblatex",
-    "-o",
-    options.output,
-  ]);
-  process.stdout.write(`${JSON.stringify({ input: options.input, output: options.output }, null, 2)}\n`);
+  try {
+    run("pandoc", [inputPath, "--from", from, "--to", to, "-o", options.output]);
+  } finally {
+    if (scratch) rmSync(scratch, { recursive: true, force: true });
+  }
+  process.stdout.write(`${JSON.stringify({ input: options.input, output: options.output, from, to }, null, 2)}\n`);
   return 0;
 }
 

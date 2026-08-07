@@ -50,7 +50,9 @@ function pdfPages(path) {
   }
   const result = spawnSync("pdftotext", ["-layout", path, "-"], { encoding: "utf8", maxBuffer: 128 * 1024 * 1024 });
   if (result.status !== 0) throw new Error(`pdftotext failed on ${path}: ${(result.stderr || "").slice(0, 400)}`);
-  return result.stdout.split("\f").map((page) => page.replace(/\s+$/, ""));
+  const pages = result.stdout.split("\f").map((page) => page.replace(/\s+$/, ""));
+  if (pages.at(-1) === "") pages.pop();
+  return pages;
 }
 
 function walk(dir, out = []) {
