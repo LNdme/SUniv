@@ -19,12 +19,9 @@
   // refuses a stack that cannot serve an agent turn. Delete this line to leave
   // the base model unset and have an administrator add the key from the Admin
   // page after deploy instead.
-  "modelProvider": "anthropic",
+  "modelProvider": "openrouter",
 
-  // Optional base model id, passed to the harness (e.g. "claude-opus-4-6").
-  // Omit it and the deployment uses the default model for the provider above.
-  // It must be a model that provider can bill.
-  // "model": "",
+  "model": "google/gemini-2.0-flash",
 
   // First-party services to run. The full set: "core" (the agent runtime and API,
   // always required), "slack" (the Slack surface, runs inside the core process),

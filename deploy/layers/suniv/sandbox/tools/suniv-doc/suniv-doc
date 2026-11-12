@@ -12,6 +12,8 @@ const USAGE = `usage: suniv-doc <command> [options]
           [--reference-doc tpl.docx]    keep a university's Word template
   bib --input works.json --output OUT   CSL-JSON to BibTeX, or the reverse
   text --input paper.pdf                extract text, one page per form feed
+  lint --input draft.md [--bib refs.json] [--strict]
+                                        verify citations, grounding levels and disclosures
 
 The student keeps writing in Word, LaTeX or Overleaf; this moves the document
 between those worlds instead of replacing them.`;
@@ -168,6 +170,119 @@ function commandText(options) {
   return 0;
 }
 
+function extractCitations(text) {
+  const keys = new Set();
+  const mdRegex = /\[@([a-zA-Z0-9_:.#/-]+)\]|@([a-zA-Z0-9_:.#/-]+)/g;
+  let match;
+  while ((match = mdRegex.exec(text)) !== null) {
+    const key = match[1] || match[2];
+    if (key && !key.startsWith("fig:") && !key.startsWith("tbl:") && !key.startsWith("eq:")) {
+      keys.add(key);
+    }
+  }
+  const texRegex = /\\cite(?:\[[^\]]*\])?\{([^}]+)\}/g;
+  while ((match = texRegex.exec(text)) !== null) {
+    for (const part of match[1].split(",")) {
+      const trimmed = part.trim();
+      if (trimmed) keys.add(trimmed);
+    }
+  }
+  return Array.from(keys);
+}
+
+function loadBibliography(bibPath) {
+  if (!bibPath || !existsSync(bibPath)) return new Map();
+  const raw = readFileSync(bibPath, "utf8");
+  const map = new Map();
+  try {
+    const parsed = JSON.parse(raw);
+    const items = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.items) ? parsed.items : [];
+    for (const item of items) {
+      if (item && item.id) {
+        map.set(String(item.id), item);
+      }
+    }
+  } catch {}
+  return map;
+}
+
+function commandLint(options) {
+  if (!options.input) throw new Error("lint needs --input");
+  if (!existsSync(options.input)) throw new Error(`input not found: ${options.input}`);
+
+  const content = readFileSync(options.input, "utf8");
+  const citedKeys = extractCitations(content);
+  const bibMap = options.bib ? loadBibliography(options.bib) : new Map();
+
+  const diagnostics = [];
+  const grounding = {
+    fulltext: [],
+    abstract: [],
+    metadata: [],
+    ungrounded: [],
+  };
+  const unresolved = [];
+
+  for (const key of citedKeys) {
+    if (options.bib && !bibMap.has(key)) {
+      unresolved.push(key);
+      diagnostics.push({
+        severity: "error",
+        key,
+        message: `Citation key "${key}" not found in bibliography ${options.bib}`,
+      });
+      continue;
+    }
+    const item = bibMap.get(key);
+    const level = item?.custom?.suniv?.grounding || (options.bib ? "ungrounded" : "unverified");
+    if (grounding[level]) {
+      grounding[level].push(key);
+    } else {
+      grounding.ungrounded.push(key);
+    }
+    if (level === "abstract") {
+      diagnostics.push({
+        severity: "warning",
+        key,
+        message: `Citation "${key}" rests on abstract only; do not cite methodology beyond declared summary`,
+      });
+    } else if (level === "metadata" || level === "ungrounded") {
+      diagnostics.push({
+        severity: "error",
+        key,
+        message: `Citation "${key}" has only ${level} grounding; claim without read text violates citation-integrity`,
+      });
+    }
+  }
+
+  const disclosureWarnings = [];
+  const disclosureRegex = /(?:arxiv|biorxiv|medrxiv|preprint|github\.com|open-source|public release|submitted to)/i;
+  if (disclosureRegex.test(content)) {
+    disclosureWarnings.push({
+      severity: "warning",
+      message: "Potential public disclosure keywords detected in draft; verify patent filing status with disclosure-guard before submission",
+    });
+  }
+
+  const hasFatalErrors = unresolved.length > 0 || grounding.ungrounded.length > 0 || (options.strict && grounding.metadata.length > 0);
+  const report = {
+    input: options.input,
+    bibliography: options.bib || null,
+    valid: !hasFatalErrors,
+    citations: {
+      total: citedKeys.length,
+      keys: citedKeys,
+      unresolved,
+    },
+    grounding,
+    diagnostics,
+    disclosureWarnings,
+  };
+
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  return hasFatalErrors ? 1 : 0;
+}
+
 function parseArgs(argv) {
   const options = { _: [] };
   for (let i = 0; i < argv.length; i++) {
@@ -191,6 +306,9 @@ function parseArgs(argv) {
         break;
       case "--reference-doc":
         options.referenceDoc = next();
+        break;
+      case "--strict":
+        options.strict = true;
         break;
       default:
         if (arg.startsWith("--")) return { error: `unknown option ${arg}` };
@@ -224,6 +342,8 @@ function main() {
         return commandBib(options);
       case "text":
         return commandText(options);
+      case "lint":
+        return commandLint(options);
       default:
         process.stderr.write(`suniv-doc: unknown command "${command}"\n\n${USAGE}\n`);
         return 2;
